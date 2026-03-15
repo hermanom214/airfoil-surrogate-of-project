@@ -1,0 +1,4 @@
+project_root_windows: "C:/Users/martina/airfoil_surrogate_OF_project"
+template_case_windows: "C:/Users/martina/airfoil_surrogate_OF_project/templates/openfoam_base_case"
+openfoam_run_root_cygwin: "/cygdrive/c/OpenFOAM/20.09/martina-dev/run/airfoil_surrogate_cases"
+openfoam_bashrc_cygwin: "/cygdrive/c/OpenFOAM/20.09/etc/bashrc"

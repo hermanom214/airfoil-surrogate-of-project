@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# virtual env
+.venv/
+venv/
+
+# vscode
+.vscode/
+
+# OpenFOAM runtime
+processor*/
+postProcessing/
+logs/
+*.foam
+
+# CFD outputs
+[0-9]*
+constant/polyMesh/
+
+# geometry outputs
+geometry/generated_profiles/
+
+# OS
+.DS_Store
+Thumbs.db
