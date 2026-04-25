@@ -27,3 +27,4 @@ geometry/generated_profiles/
 # OS
 .DS_Store
 Thumbs.db
+configs/paths.yaml
