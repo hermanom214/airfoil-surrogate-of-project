@@ -27,3 +27,10 @@ geometry/generated_profiles/
 .DS_Store
 Thumbs.db
 configs/paths.yaml
+
+# generated CFD data
+**/run/
+**/airfoil_surrogate_cases/
+
+# BACKUP folder
+BACKUP*
