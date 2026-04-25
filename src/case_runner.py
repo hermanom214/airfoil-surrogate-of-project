@@ -7,6 +7,21 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Iterable
 
+from src.config import load_paths
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+CONFIG_PATH = PROJECT_ROOT / "configs" / "paths.yaml"
+PATHS = load_paths(CONFIG_PATH)
+OF_BASH = str(PATHS.openfoam_bash)
+
+def to_cygwin_path(path: Path) -> str:
+    """
+    Convert Windows path like C:\\OpenFOAM\\... to Cygwin path like /cygdrive/c/OpenFOAM/...
+    """
+    p = path.resolve()
+    drive = p.drive.rstrip(":").lower()
+    rest = p.relative_to(p.anchor).as_posix()
+    return f"/cygdrive/{drive}/{rest}"
 
 @dataclass
 class CommandResult:
@@ -40,16 +55,29 @@ def run_command(
     log_name: str,
 ) -> CommandResult:
     """
-    Spustí OpenFOAM command v daném case directory a uloží stdout/stderr do logu.
+    Runs an OpenFOAM command inside a case directory and writes stdout/stderr to a log file.
+    Can be launched from normal VS Code/PowerShell because the actual command is executed
+    through the OpenFOAM Cygwin bash.
     """
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / log_name
 
     start = time.perf_counter()
 
+    cyg_case_dir = to_cygwin_path(case_dir)
+    foam_command = " ".join(command)
+    
+    wrapped_command = [
+        OF_BASH,
+        "--login",
+        "-i",
+        "-c",
+        f"cd '{cyg_case_dir}' && {foam_command}",
+    ]
+
     with log_file.open("w", encoding="utf-8") as f:
         process = subprocess.run(
-            command,
+            wrapped_command,
             cwd=case_dir,
             stdout=f,
             stderr=subprocess.STDOUT,
@@ -61,7 +89,7 @@ def run_command(
     runtime_sec = time.perf_counter() - start
 
     return CommandResult(
-        command=" ".join(command),
+        command=" ".join(wrapped_command),
         returncode=process.returncode,
         runtime_sec=runtime_sec,
         log_file=str(log_file),
@@ -70,8 +98,7 @@ def run_command(
 
 def discover_case_dirs(cases_root: Path) -> list[Path]:
     """
-    Najde case složky. Jednoduché pravidlo:
-    case je adresář obsahující podsložky 0, constant a system.
+    Finds case directories. A valid case contains 0, constant, and system folders.
     """
     case_dirs: list[Path] = []
 
@@ -84,6 +111,7 @@ def discover_case_dirs(cases_root: Path) -> list[Path]:
             and (path / "constant").is_dir()
             and (path / "system").is_dir()
         )
+
         if has_required:
             case_dirs.append(path)
 
@@ -92,8 +120,8 @@ def discover_case_dirs(cases_root: Path) -> list[Path]:
 
 def run_single_case(case_dir: Path) -> CaseRunResult:
     """
-    Spustí celý CFD chain pro jeden case.
-    Pokud některý krok failne, další kroky se už nespustí.
+    Runs the full CFD chain for one case.
+    If one step fails, the remaining steps are skipped.
     """
     case_id = case_dir.name
     log_dir = case_dir / "logs"
@@ -129,6 +157,7 @@ def run_single_case(case_dir: Path) -> CaseRunResult:
         else:
             statuses[status_key] = f"failed({result.returncode})"
             runtime_sec = time.perf_counter() - overall_start
+
             return CaseRunResult(
                 case_id=case_id,
                 case_path=str(case_dir),
@@ -142,6 +171,7 @@ def run_single_case(case_dir: Path) -> CaseRunResult:
             )
 
     runtime_sec = time.perf_counter() - overall_start
+
     return CaseRunResult(
         case_id=case_id,
         case_path=str(case_dir),
@@ -157,30 +187,26 @@ def run_single_case(case_dir: Path) -> CaseRunResult:
 
 def write_run_status_csv(results: Iterable[CaseRunResult], output_csv: Path) -> None:
     """
-    Zapíše výsledky běhů do CSV.
+    Writes run results to CSV.
     """
     rows = [asdict(r) for r in results]
     output_csv.parent.mkdir(parents=True, exist_ok=True)
 
-    if not rows:
-        with output_csv.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    "case_id",
-                    "case_path",
-                    "blockmesh_status",
-                    "surfacefeatures_status",
-                    "snappyhexmesh_status",
-                    "checkmesh_status",
-                    "simplefoam_status",
-                    "overall_status",
-                    "runtime_sec",
-                ]
-            )
-        return
+    fieldnames = [
+        "case_id",
+        "case_path",
+        "blockmesh_status",
+        "surfacefeatures_status",
+        "snappyhexmesh_status",
+        "checkmesh_status",
+        "simplefoam_status",
+        "overall_status",
+        "runtime_sec",
+    ]
 
     with output_csv.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(rows)
+
+        if rows:
+            writer.writerows(rows)

@@ -12,6 +12,8 @@ class ProjectPaths:
     generated_profiles: Path
     sampling_table: Path
     openfoam_run_root: Path
+    openfoam_bash: Path
+    openfoam_case_sim: Path
 
 
 def load_paths(config_path: Path) -> ProjectPaths:
@@ -27,4 +29,6 @@ def load_paths(config_path: Path) -> ProjectPaths:
         generated_profiles=Path(data["generated_profiles_windows"]),
         sampling_table=Path(data["sampling_table_windows"]),
         openfoam_run_root=Path(data["openfoam_run_root_windows"]),
+        openfoam_bash=Path(data["openfoam_bash_windows"]), 
+        openfoam_case_sim=Path(data["openfoam_case_sim_windows"]),
     )

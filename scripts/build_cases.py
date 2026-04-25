@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+import shutil
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
@@ -33,6 +34,7 @@ def main() -> None:
 
     built_cases = []
 
+        # ===== BUILD =====
     for i, row in enumerate(rows, start=1):
         case_dir = build_single_case(
             row=row,
@@ -43,6 +45,19 @@ def main() -> None:
         )
         built_cases.append(case_dir)
         print(f"Built case: {case_dir.name}")
+    
+     # ===== COPY =====
+    print("\nCopying cases to OpenFOAM run directory...")
+
+    for case_dir in built_cases:
+        target_dir = paths.openfoam_case_sim / case_dir.name
+
+        if target_dir.exists():
+            shutil.rmtree(target_dir)
+
+        shutil.copytree(case_dir, target_dir)
+
+        print(f"Copied: {case_dir.name}")
 
     print("\nDone.")
     print(f"Total built cases: {len(built_cases)}")

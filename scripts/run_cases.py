@@ -10,6 +10,8 @@ import sys
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
+from src.config import load_paths
+
 from src.case_runner import (
     discover_case_dirs,
     run_single_case,
@@ -19,7 +21,10 @@ from src.case_runner import (
 
 def main() -> None:
     # Uprav podle svého prostředí
-    cases_root = Path(r"C:\OpenFOAM\20.09\martina-dev\run\airfoil_surrogate_cases")
+    #paths = load_paths()
+    config_path = Path(__file__).resolve().parents[1] / "configs" / "paths.yaml"
+    paths = load_paths(config_path)
+    cases_root = paths.openfoam_case_sim
     output_csv = cases_root / "run_status.csv"
 
     case_dirs = discover_case_dirs(cases_root)

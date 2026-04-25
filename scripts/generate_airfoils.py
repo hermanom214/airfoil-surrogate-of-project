@@ -5,6 +5,7 @@ import math
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import List, Tuple
+import sys
 
 
 # ============================================================
@@ -15,9 +16,15 @@ from typing import List, Tuple
 # Později můžeš přepnout na False a použít REAL_RUN_CASES.
 # ============================================================
 
-PROJECT_ROOT = Path(r"C:\Users\martina\airfoil_surrogate_OF_project")
-OUTPUT_DIR = PROJECT_ROOT / "geometry" / "generated_profiles"
-CSV_PATH = OUTPUT_DIR / "airfoil_sampling_table.csv"
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+from src.config import load_paths
+
+CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "paths.yaml"
+PATHS = load_paths(CONFIG_PATH)
+
+PROJECT_ROOT = PATHS.project_root
+OUTPUT_DIR = PATHS.generated_profiles
+CSV_PATH = PATHS.sampling_table
 
 TEST_MODE = True
 
