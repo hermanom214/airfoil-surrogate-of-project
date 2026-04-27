@@ -39,7 +39,7 @@ runTimeModifiable true;
 
 functions
 {
-    #include "forceCoeffs"
+    include "forceCoeffs"
 	
 	residuals
     {

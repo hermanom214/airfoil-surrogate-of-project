@@ -5,3 +5,4 @@ sampling_table_windows: "D:/Martina/REPOS/airfoil_OF_ML_project/airfoil-surrogat
 openfoam_run_root_windows: "D:/Martina/REPOS/airfoil_OF_ML_project/airfoil-surrogate-OF-project/run/airfoil_surrogate_cases"
 openfoam_bash_windows: "C:/OpenFOAM/20.09/cygwin64/bin/bash.exe"
 openfoam_case_sim_windows: "C:/OpenFOAM/20.09/test_martina-dev/run/airfoil_surrogate_cases"
+flow_fields_output: "D:/Martina/REPOS/airfoil_OF_ML_project/airfoil-surrogate-of-project/data/flow_fields"

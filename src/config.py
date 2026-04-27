@@ -14,6 +14,7 @@ class ProjectPaths:
     openfoam_run_root: Path
     openfoam_bash: Path
     openfoam_case_sim: Path
+    flow_fields_output: Path
 
 
 def load_paths(config_path: Path) -> ProjectPaths:
@@ -31,4 +32,5 @@ def load_paths(config_path: Path) -> ProjectPaths:
         openfoam_run_root=Path(data["openfoam_run_root_windows"]),
         openfoam_bash=Path(data["openfoam_bash_windows"]), 
         openfoam_case_sim=Path(data["openfoam_case_sim_windows"]),
+        flow_fields_output=Path(data["flow_fields_output"]),
     )
