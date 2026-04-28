@@ -11,5 +11,6 @@ surfaces
     "airfoil.stl"
 );
 
-includedAngle   150;
+//includedAngle   100;
+includedAngle   180;
 writeObj        yes;

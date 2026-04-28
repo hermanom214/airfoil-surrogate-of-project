@@ -8,7 +8,7 @@ FoamFile
 
 castellatedMesh true;
 snap            true;
-addLayers       false;
+addLayers       true;
 
 geometry
 {
@@ -17,6 +17,20 @@ geometry
         type triSurfaceMesh;
         name airfoil;
     }
+	
+	refinementBoxAirfoil
+	{
+		type searchableBox;
+		min (-0.05 -0.12 -0.06);
+		max (1.05  0.12  0.06);
+	}
+	
+	trailingEdgeBox
+	{
+		type searchableBox;
+		min (0.93 -0.04 -0.06);
+		max (1.04  0.04  0.06);
+	}
 }
 
 castellatedMeshControls
@@ -30,7 +44,7 @@ castellatedMeshControls
     (
         {
             file "airfoil.eMesh";
-            level 1;
+            level 5;
         }
     );
 
@@ -38,7 +52,7 @@ castellatedMeshControls
     {
         airfoil
         {
-            level (2 3);
+            level (4 5);
         }
     }
 
@@ -46,6 +60,18 @@ castellatedMeshControls
 
     refinementRegions
     {
+	    
+		refinementBoxAirfoil
+		{
+			mode inside;
+			levels ((1E15 2));
+		}
+		
+		trailingEdgeBox
+		{
+			mode inside;
+			levels ((1E15 3));
+		}
     }
 
     locationInMesh (2 0 0);
@@ -55,10 +81,14 @@ castellatedMeshControls
 
 snapControls
 {
-    nSmoothPatch 5;
-    tolerance 1.0;
+    nSmoothPatch 10;
+    tolerance 2.0;
     nSolveIter 100;
-    nRelaxIter 8;
+    nRelaxIter 10;
+    nFeatureSnapIter 20;
+    implicitFeatureSnap false;
+    explicitFeatureSnap true;
+    multiRegionFeatureSnap false;
 }
 
 addLayersControls
@@ -67,23 +97,31 @@ addLayersControls
 
     layers
     {
+        airfoil
+        {
+            nSurfaceLayers 8;
+        }
     }
 
-    expansionRatio      1.0;
-    finalLayerThickness 0.3;
-    minThickness        0.1;
-    nGrow               0;
+    expansionRatio          1.2;
+    finalLayerThickness     0.35;
+    minThickness            0.05;
+    nGrow                   0;
 
-    featureAngle        60;
-    nRelaxIter          3;
-    nSmoothSurfaceNormals 1;
-    nSmoothNormals      3;
-    nSmoothThickness    10;
-    maxFaceThicknessRatio 0.5;
+    featureAngle            120;
+    slipFeatureAngle        30;
+
+    nRelaxIter              5;
+    nSmoothSurfaceNormals   3;
+    nSmoothNormals          3;
+    nSmoothThickness        10;
+
+    maxFaceThicknessRatio   0.5;
     maxThicknessToMedialRatio 0.3;
-    minMedianAxisAngle  90;
-    nBufferCellsNoExtrude 0;
-    nLayerIter          0;
+    minMedianAxisAngle      90;
+
+    nBufferCellsNoExtrude   0;
+    nLayerIter              50;
 }
 
 

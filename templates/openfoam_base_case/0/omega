@@ -41,15 +41,15 @@ boundaryField
     airfoil
     {
         type            omegaWallFunction;
-		value			uniform 1e-10;
+        value           uniform 10;
     }
 	front
 	{
-		type			empty;
+		type			symmetryPlane;
 	}
 	back
 	{
-		type			empty;
+		type			symmetryPlane;
 	}
 }
 

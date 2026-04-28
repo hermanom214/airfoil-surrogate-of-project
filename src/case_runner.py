@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import cmd
 import csv
 import subprocess
 import time
@@ -13,6 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = PROJECT_ROOT / "configs" / "paths.yaml"
 PATHS = load_paths(CONFIG_PATH)
 OF_BASH = str(PATHS.openfoam_bash)
+N_PROCS = 4
 
 def to_cygwin_path(path: Path) -> str:
     """
@@ -44,6 +46,7 @@ class CaseRunResult:
     snappyhexmesh_status: str
     checkmesh_status: str
     simplefoam_status: str
+    reconstruct_status: str
     overall_status: str
     runtime_sec: float
 
@@ -65,8 +68,16 @@ def run_command(
     start = time.perf_counter()
 
     cyg_case_dir = to_cygwin_path(case_dir)
-    foam_command = " ".join(command)
+
+    #foam_command = " ".join(command)
     
+    def wrap_parallel(cmd: list[str]) -> str:
+        if "-parallel" in cmd:
+            return f"mpiexec -np {N_PROCS} {' '.join(cmd)}"
+        return " ".join(cmd)
+
+    foam_command = wrap_parallel(command)
+
     wrapped_command = [
         OF_BASH,
         "--login",
@@ -131,17 +142,21 @@ def run_single_case(case_dir: Path) -> CaseRunResult:
     steps = [
         ("blockmesh_status", ["blockMesh"], "01_blockMesh.log"),
         ("surfacefeatures_status", ["surfaceFeatures"], "02_surfaceFeatures.log"),
+        # snappy serial: safer for this 2D/empty case
         ("snappyhexmesh_status", ["snappyHexMesh", "-overwrite"], "03_snappyHexMesh.log"),
         ("checkmesh_status", ["checkMesh"], "04_checkMesh.log"),
-        ("simplefoam_status", ["simpleFoam"], "05_simpleFoam.log"),
+        ("decompose_status", ["decomposePar", "-force"], "05_decomposePar.log"),
+        ("simplefoam_status", ["simpleFoam", "-parallel"], "06_simpleFoam.log"),
+        ("reconstruct_status", ["reconstructPar", "-latestTime"], "07_reconstruct.log"),
     ]
-
+ 
     statuses = {
         "blockmesh_status": "not_run",
         "surfacefeatures_status": "not_run",
         "snappyhexmesh_status": "not_run",
         "checkmesh_status": "not_run",
         "simplefoam_status": "not_run",
+        "reconstruct_status": "not_run",
     }
 
     for status_key, command, log_name in steps:
@@ -166,6 +181,7 @@ def run_single_case(case_dir: Path) -> CaseRunResult:
                 snappyhexmesh_status=statuses["snappyhexmesh_status"],
                 checkmesh_status=statuses["checkmesh_status"],
                 simplefoam_status=statuses["simplefoam_status"],
+                reconstruct_status=statuses["reconstruct_status"],
                 overall_status="failed",
                 runtime_sec=round(runtime_sec, 3),
             )
@@ -180,6 +196,7 @@ def run_single_case(case_dir: Path) -> CaseRunResult:
         snappyhexmesh_status=statuses["snappyhexmesh_status"],
         checkmesh_status=statuses["checkmesh_status"],
         simplefoam_status=statuses["simplefoam_status"],
+        reconstruct_status=statuses["reconstruct_status"],
         overall_status="ok",
         runtime_sec=round(runtime_sec, 3),
     )
@@ -200,6 +217,7 @@ def write_run_status_csv(results: Iterable[CaseRunResult], output_csv: Path) -> 
         "snappyhexmesh_status",
         "checkmesh_status",
         "simplefoam_status",
+        "reconstruct_status",
         "overall_status",
         "runtime_sec",
     ]

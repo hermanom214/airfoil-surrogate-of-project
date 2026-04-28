@@ -40,16 +40,16 @@ boundaryField
     }
     airfoil
     {
-        type            kqRWallFunction;
-		value			uniform 1e-10;
+        type            fixedValue;
+        value           uniform 0;
     }
 	front
 	{
-		type			empty;
+		type			symmetryPlane;
 	}
 	back
 	{
-		type			empty;
+		type			symmetryPlane;
 	}
 }
 
