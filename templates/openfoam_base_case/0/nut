@@ -41,18 +41,24 @@ boundaryField
         type            calculated;
         value           uniform 0;
     }
-    airfoil
+    airfoil_main
+    {
+		type            nutLowReWallFunction;
+		value           uniform 0;
+    }
+	
+	airfoil_TE
     {
 		type            nutLowReWallFunction;
 		value           uniform 0;
     }
 	front
 	{
-		type			symmetryPlane;
+		type			empty;
 	}
 	back
 	{
-		type			symmetryPlane;
+		type			empty;
 	}
 }
 

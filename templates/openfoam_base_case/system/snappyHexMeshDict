@@ -16,6 +16,19 @@ geometry
     {
         type triSurfaceMesh;
         name airfoil;
+
+        regions
+        {
+            airfoil_main
+            {
+                name airfoil_main;
+            }
+
+            airfoil_TE
+            {
+                name airfoil_TE;
+            }
+        }
     }
 	
 	refinementBoxAirfoil
@@ -31,6 +44,13 @@ geometry
 		min (0.93 -0.04 -0.06);
 		max (1.04  0.04  0.06);
 	}
+	
+	trailingEdgeSmallBox
+	{
+		type searchableBox;
+		min (0.98 -0.03 -0.06);
+		max (1.02  0.03  0.06);
+	}
 }
 
 castellatedMeshControls
@@ -44,17 +64,43 @@ castellatedMeshControls
     (
         {
             file "airfoil.eMesh";
-            level 5;
+            level 6;
         }
     );
 
-    refinementSurfaces
+	refinementSurfaces
+	{
+    airfoil
     {
-        airfoil
+        level (4 5);
+
+        patchInfo
         {
-            level (4 5);
+            type wall;
+        }
+
+        regions
+        {
+            airfoil_main
+            {
+                level (4 5);
+                patchInfo
+                {
+                    type wall;
+                }
+            }
+
+            airfoil_TE
+            {
+                level (5 6);
+                patchInfo
+                {
+                    type wall;
+                }
+            }
         }
     }
+	}
 
     resolveFeatureAngle 30;
 
@@ -64,13 +110,22 @@ castellatedMeshControls
 		refinementBoxAirfoil
 		{
 			mode inside;
+			//levels ((1E15 3));
 			levels ((1E15 2));
 		}
 		
 		trailingEdgeBox
 		{
 			mode inside;
-			levels ((1E15 3));
+			//levels ((1E15 3));
+			levels ((1E15 4));
+		}
+		
+		trailingEdgeSmallBox
+		{
+			mode inside;
+			//levels ((1E15 4));
+			levels ((1E15 5));
 		}
     }
 
@@ -83,6 +138,7 @@ snapControls
 {
     nSmoothPatch 10;
     tolerance 2.0;
+	//tolerance 1.2;
     nSolveIter 100;
     nRelaxIter 10;
     nFeatureSnapIter 20;
@@ -95,35 +151,41 @@ addLayersControls
 {
     relativeSizes true;
 
-    layers
+	layers
     {
-        airfoil
+        airfoil_main
         {
-            nSurfaceLayers 8;
+            nSurfaceLayers 0;
+        }
+
+        airfoil_TE
+        {
+            nSurfaceLayers 0;
         }
     }
 
-    expansionRatio          1.2;
-    finalLayerThickness     0.35;
-    minThickness            0.05;
-    nGrow                   0;
+    expansionRatio              1.2;
+    finalLayerThickness         0.1;
+    minThickness                0.05;
 
-    featureAngle            120;
-    slipFeatureAngle        30;
+    nGrow                       3;
 
-    nRelaxIter              5;
-    nSmoothSurfaceNormals   3;
-    nSmoothNormals          3;
-    nSmoothThickness        10;
+    featureAngle                60;
+    slipFeatureAngle            30;
 
-    maxFaceThicknessRatio   0.5;
-    maxThicknessToMedialRatio 0.3;
-    minMedianAxisAngle      90;
+    nRelaxIter                  8;
+    nSmoothSurfaceNormals       5;
+    nSmoothNormals              5;
+    nSmoothThickness            20;
 
-    nBufferCellsNoExtrude   0;
-    nLayerIter              50;
+    maxFaceThicknessRatio       0.35;
+    maxThicknessToMedialRatio   0.25;
+    minMedianAxisAngle          70;
+
+    nBufferCellsNoExtrude       4;
+
+    nLayerIter                  80;
 }
-
 
 meshQualityControls
 {

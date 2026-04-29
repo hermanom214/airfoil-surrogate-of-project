@@ -20,7 +20,7 @@ liftDir         (0 1 0);
 dragDir         (1 0 0);
 pitchAxis       (0 0 1);
 
-magUInf         20;
+magUInf         20.000000;
 
 lRef            1.0;
 Aref            1.0;

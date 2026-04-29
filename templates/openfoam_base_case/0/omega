@@ -38,18 +38,24 @@ boundaryField
     {
         type            zeroGradient;
     }
-    airfoil
+    airfoil_main
     {
         type            omegaWallFunction;
         value           uniform 10;
     }
+	airfoil_TE
+    {
+        type            omegaWallFunction;
+        value           uniform 10;
+    }
+	
 	front
 	{
-		type			symmetryPlane;
+		type			empty;
 	}
 	back
 	{
-		type			symmetryPlane;
+		type			empty;
 	}
 }
 

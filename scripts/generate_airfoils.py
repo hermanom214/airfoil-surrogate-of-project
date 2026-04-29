@@ -24,18 +24,16 @@ CSV_PATH = PATHS.sampling_table
 
 TEST_MODE = True
 
-# Body pro původní NACA výpočet.
-N_POINTS = 161
+N_POINTS = 241
 
-# Body finální STL smyčky po arclength resamplingu.
-# Cíl: žádné extrémně úzké segmenty u LE/TE.
-STL_LOOP_POINTS = 600
-
-# Tenká extruze pro STL v ose z.
 Z_MIN = -0.05
 Z_MAX = 0.05
 
 CHORD = 1.0
+
+# Poslední část profilu pro samostatný STL region bez layers.
+# 0.97 = poslední 3 % chordu.
+TE_SPLIT_X = 0.95
 
 
 # ============================================================
@@ -56,7 +54,7 @@ class AirfoilCase:
 
 
 # ============================================================
-# POMOCNÉ FUNKCE
+# GEOMETRIE
 # ============================================================
 
 def ensure_output_dir(path: Path) -> None:
@@ -64,27 +62,19 @@ def ensure_output_dir(path: Path) -> None:
 
 
 def cosine_spacing(n_points: int) -> List[float]:
-    xs = []
-    for i in range(n_points):
-        beta = math.pi * i / (n_points - 1)
-        x = 0.5 * (1.0 - math.cos(beta))
-        xs.append(x)
-    return xs
+    return [
+        0.5 * (1.0 - math.cos(math.pi * i / (n_points - 1)))
+        for i in range(n_points)
+    ]
 
 
 def thickness_distribution(x: float, thickness_fraction: float) -> float:
-    """
-    NACA 4-digit half-thickness.
-
-    Koeficient -0.1015 dává malou, ale nenulovou trailing-edge tloušťku.
-    To je pro snappyHexMesh lepší než matematicky ostrý TE.
-    """
     yt = 5.0 * thickness_fraction * (
         0.2969 * math.sqrt(max(x, 1e-12))
         - 0.1260 * x
         - 0.3516 * x**2
         + 0.2843 * x**3
-        - 0.1015 * x**4
+        - 0.1036 * x**4
     )
     return yt
 
@@ -141,108 +131,36 @@ def generate_naca4_coordinates(
     return upper_points, lower_points
 
 
+def force_sharp_trailing_edge(
+    upper_points: List[Tuple[float, float]],
+    lower_points: List[Tuple[float, float]],
+    chord: float = 1.0,
+) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
+    upper = upper_points.copy()
+    lower = lower_points.copy()
+
+    y_te = 0.5 * (upper[-1][1] + lower[-1][1])
+    x_te = chord
+
+    upper[-1] = (x_te, y_te)
+    lower[-1] = (x_te, y_te)
+
+    return upper, lower
+
+
 def build_closed_profile_loop(
     upper_points: List[Tuple[float, float]],
     lower_points: List[Tuple[float, float]],
 ) -> List[Tuple[float, float]]:
-    """
-    Uzavřená smyčka:
-    - horní strana TE -> LE
-    - dolní strana LE -> TE
-
-    Důležité:
-    lower TE bod musí zůstat. Není duplicitní, pokud má TE nenulovou tloušťku.
-    Původní lower_points[1:-1] vyhazovalo lower TE a mohlo vytvářet špatné
-    zavření profilu v oblasti odtokové hrany.
-    """
     upper_te_to_le = list(reversed(upper_points))
-    lower_le_to_te = lower_points[1:]  # bez duplikace LE, ale ponechat lower TE
+    lower_le_to_near_te = lower_points[1:-1]
 
-    return upper_te_to_le + lower_le_to_te
-
-
-def distance_2d(a: Tuple[float, float], b: Tuple[float, float]) -> float:
-    dx = b[0] - a[0]
-    dy = b[1] - a[1]
-    return math.sqrt(dx * dx + dy * dy)
+    return upper_te_to_le + lower_le_to_near_te
 
 
-def resample_closed_loop_by_arclength(
-    points: List[Tuple[float, float]],
-    n_points: int,
-) -> List[Tuple[float, float]]:
-    """
-    Převzorkuje uzavřenou smyčku na přibližně rovnoměrné rozestupy po oblouku.
-
-    Důvod:
-    cosine spacing vytváří hodně krátké segmenty u LE/TE.
-    Pro snappyHexMesh to může znamenat tenké STL fasety a špatný snap.
-    """
-    if len(points) < 4:
-        raise ValueError("Need at least 4 points for closed loop resampling.")
-
-    closed = points + [points[0]]
-
-    segment_lengths: List[float] = []
-    total_length = 0.0
-
-    for i in range(len(closed) - 1):
-        length = distance_2d(closed[i], closed[i + 1])
-        segment_lengths.append(length)
-        total_length += length
-
-    if total_length <= 0:
-        raise ValueError("Invalid loop length.")
-
-    resampled: List[Tuple[float, float]] = []
-
-    target_spacing = total_length / n_points
-    current_segment = 0
-    accumulated = 0.0
-
-    for k in range(n_points):
-        target = k * target_spacing
-
-        while (
-            current_segment < len(segment_lengths) - 1
-            and accumulated + segment_lengths[current_segment] < target
-        ):
-            accumulated += segment_lengths[current_segment]
-            current_segment += 1
-
-        a = closed[current_segment]
-        b = closed[current_segment + 1]
-        seg_len = segment_lengths[current_segment]
-
-        if seg_len == 0:
-            resampled.append(a)
-            continue
-
-        local_t = (target - accumulated) / seg_len
-
-        x = a[0] + local_t * (b[0] - a[0])
-        y = a[1] + local_t * (b[1] - a[1])
-
-        resampled.append((x, y))
-
-    return resampled
-
-
-def rotate_points(
-    points: List[Tuple[float, float]],
-    angle_deg: float,
-) -> List[Tuple[float, float]]:
-    angle_rad = math.radians(angle_deg)
-    ca = math.cos(angle_rad)
-    sa = math.sin(angle_rad)
-
-    rotated = []
-    for x, y in points:
-        xr = ca * x - sa * y
-        yr = sa * x + ca * y
-        rotated.append((xr, yr))
-    return rotated
-
+# ============================================================
+# EXPORT
+# ============================================================
 
 def write_dat_file(
     path: Path,
@@ -281,6 +199,7 @@ def write_facet(
     c: Tuple[float, float, float],
 ) -> None:
     nx, ny, nz = triangle_normal(a, b, c)
+
     f.write(f"  facet normal {nx:.8e} {ny:.8e} {nz:.8e}\n")
     f.write("    outer loop\n")
     f.write(f"      vertex {a[0]:.8e} {a[1]:.8e} {a[2]:.8e}\n")
@@ -288,6 +207,26 @@ def write_facet(
     f.write(f"      vertex {c[0]:.8e} {c[1]:.8e} {c[2]:.8e}\n")
     f.write("    endloop\n")
     f.write("  endfacet\n")
+
+
+def classify_stl_region(
+    p1: Tuple[float, float],
+    p2: Tuple[float, float],
+    chord: float,
+    te_split_x: float,
+) -> str:
+    """
+    Segmenty profilu blízko trailing edge pošle do airfoil_TE.
+    Zbytek do airfoil_main.
+
+    Používáme střed segmentu, aby se regiony nerozbíjely bodově.
+    """
+    x_mid = 0.5 * (p1[0] + p2[0])
+
+    if x_mid >= te_split_x * chord:
+        return "airfoil_TE"
+
+    return "airfoil_main"
 
 
 def write_ascii_stl(
@@ -298,50 +237,51 @@ def write_ascii_stl(
     z_max: float,
 ) -> None:
     """
-    Extrudovaný ASCII STL.
+    Extrudovaný STL pouze z bočního pláště.
 
-    Opravy proti původní verzi:
-    - smyčka zachovává oba TE body
-    - cap triangulace jde z centroidu, ne z jednoho TE bodu
+    STL je rozdělené na dva solid/region bloky:
+    - airfoil_main -> bude mít boundary layers
+    - airfoil_TE   -> bez boundary layers
+
+    Bez caps, protože cap triangulace dělala špatné fasety pro snappy.
     """
     front = [(x, y, z_min) for x, y in loop_points]
     back = [(x, y, z_max) for x, y in loop_points]
     n = len(loop_points)
 
-    solid_name = f"airfoil_naca_{case.naca_code()}"
+    facets_by_region = {
+        "airfoil_main": [],
+        "airfoil_TE": [],
+    }
+
+    for i in range(n):
+        j = (i + 1) % n
+
+        region = classify_stl_region(
+            loop_points[i],
+            loop_points[j],
+            chord=case.chord,
+            te_split_x=TE_SPLIT_X,
+        )
+
+        a = front[i]
+        b = front[j]
+        c = back[j]
+        d = back[i]
+
+        facets_by_region[region].append((a, b, c))
+        facets_by_region[region].append((a, c, d))
 
     with path.open("w", encoding="utf-8") as f:
-        f.write(f"solid {solid_name}\n")
+        for region_name in ["airfoil_main", "airfoil_TE"]:
+            facets = facets_by_region[region_name]
 
-        # Boční plášť
-        for i in range(n):
-            j = (i + 1) % n
+            f.write(f"solid {region_name}\n")
 
-            a = front[i]
-            b = front[j]
-            c = back[j]
-            d = back[i]
+            for a, b, c in facets:
+                write_facet(f, a, b, c)
 
-            write_facet(f, a, b, c)
-            write_facet(f, a, c, d)
-
-        # Víka triangulovaná z centroidu.
-        # Stabilnější než fan z TE bodu.
-        #cx = sum(x for x, _ in loop_points) / n
-        #cy = sum(y for _, y in loop_points) / n
-
-        #front_center = (cx, cy, z_min)
-        #back_center = (cx, cy, z_max)
-
-        #for i in range(n):
-        #    j = (i + 1) % n
-        #    write_facet(f, front_center, front[j], front[i])
-
-        #for i in range(n):
-        #    j = (i + 1) % n
-       #     write_facet(f, back_center, back[i], back[j])
-
-        f.write(f"endsolid {solid_name}\n")
+            f.write(f"endsolid {region_name}\n")
 
 
 def write_sampling_table(csv_path: Path, cases: List[AirfoilCase]) -> None:
@@ -408,7 +348,7 @@ def get_real_run_cases() -> List[AirfoilCase]:
 
 
 # ============================================================
-# HLAVNÍ GENERAČNÍ LOGIKA
+# HLAVNÍ LOGIKA
 # ============================================================
 
 def generate_airfoil_files(cases: List[AirfoilCase], output_dir: Path) -> None:
@@ -416,13 +356,9 @@ def generate_airfoil_files(cases: List[AirfoilCase], output_dir: Path) -> None:
 
     for case in cases:
         upper, lower = generate_naca4_coordinates(case, n_points=N_POINTS)
+        upper, lower = force_sharp_trailing_edge(upper, lower, chord=case.chord)
 
-        loop_raw = build_closed_profile_loop(upper, lower)
-
-        loop = resample_closed_loop_by_arclength(
-            loop_raw,
-            n_points=STL_LOOP_POINTS,
-        )
+        loop = build_closed_profile_loop(upper, lower)
 
         dat_path = output_dir / f"naca{case.naca_code()}.dat"
         stl_path = output_dir / f"naca{case.naca_code()}.stl"
@@ -448,6 +384,7 @@ def main() -> None:
 
     print(f"\nSaved sampling table to: {CSV_PATH}")
     print(f"Total generated airfoils: {len(cases)}")
+    print(f"TE split starts at x/c = {TE_SPLIT_X}")
 
 
 if __name__ == "__main__":
