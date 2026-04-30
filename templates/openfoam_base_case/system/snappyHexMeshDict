@@ -8,7 +8,7 @@ FoamFile
 
 castellatedMesh true;
 snap            true;
-addLayers       true;
+addLayers       false;
 
 geometry
 {
@@ -31,13 +31,34 @@ geometry
         }
     }
 	
-	refinementBoxAirfoil
+	//refinementBoxAirfoil
+	//{
+	//	type searchableBox;
+	//	min (-0.05 -0.12 -0.06);
+	//	max (1.05  0.12  0.06);
+	//}
+	
+	outerAirfoilBox
 	{
 		type searchableBox;
-		min (-0.05 -0.12 -0.06);
-		max (1.05  0.12  0.06);
+		min (-2.80 -1 -0.06);
+		max (2.00  1  0.06)
+	}
+
+	innerAirfoilBox
+	{
+		type searchableBox;
+		min (-0.50 -0.5 -0.06);
+		max (2.5  0.5  0.06);
 	}
 	
+	wakeBox
+	{
+		type searchableBox;
+		min (0.90 -0.3 -0.06);
+		max (5.00  0.3  0.06);
+	}
+
 	trailingEdgeBox
 	{
 		type searchableBox;
@@ -58,13 +79,13 @@ castellatedMeshControls
     maxLocalCells 100000;
     maxGlobalCells 2000000;
     minRefinementCells 10;
-    nCellsBetweenLevels 4;
+    nCellsBetweenLevels 10;
 
     features
     (
         {
             file "airfoil.eMesh";
-            level 6;
+            level 5;
         }
     );
 
@@ -72,7 +93,7 @@ castellatedMeshControls
 	{
     airfoil
     {
-        level (4 5);
+        level (3 3);
 
         patchInfo
         {
@@ -92,7 +113,7 @@ castellatedMeshControls
 
             airfoil_TE
             {
-                level (5 6);
+                level (4 5);
                 patchInfo
                 {
                     type wall;
@@ -107,10 +128,28 @@ castellatedMeshControls
     refinementRegions
     {
 	    
-		refinementBoxAirfoil
+		//refinementBoxAirfoil
+		//{
+		//	mode inside;
+			//levels ((1E15 3));
+		//	levels ((1E15 2));
+		//}
+		
+		outerAirfoilBox
 		{
 			mode inside;
-			//levels ((1E15 3));
+			levels ((1E15 1));
+		}
+
+		innerAirfoilBox
+		{
+			mode inside;
+			levels ((1E15 2));
+		}
+		
+		wakeBox
+		{
+			mode inside;
 			levels ((1E15 2));
 		}
 		
@@ -118,14 +157,14 @@ castellatedMeshControls
 		{
 			mode inside;
 			//levels ((1E15 3));
-			levels ((1E15 4));
+			levels ((1E15 3));
 		}
 		
 		trailingEdgeSmallBox
 		{
 			mode inside;
 			//levels ((1E15 4));
-			levels ((1E15 5));
+			levels ((1E15 4));
 		}
     }
 

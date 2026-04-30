@@ -12,7 +12,7 @@ FILES = [
     r"D:\Martina\REPOS\airfoil_OF_ML_project\airfoil-surrogate-of-project\data\flow_fields\case_0004_naca2208_aoa0p0_u20p0_flow.npz"
 ]
 
-FILE_PATH = Path(FILES[0])
+FILE_PATH = Path(FILES[1])
 
 
 def print_stats(name: str, arr: np.ndarray) -> None:
@@ -62,6 +62,13 @@ def validate_shapes(xy, p, U, fluid_mask) -> None:
         raise RuntimeError("fluid_mask and p shape mismatch")
 
 
+def robust_limits(arr: np.ndarray, low: float = 1.0, high: float = 99.0):
+    valid = arr[np.isfinite(arr)]
+    if valid.size == 0:
+        return 0.0, 1.0
+    return np.percentile(valid, low), np.percentile(valid, high)
+
+
 def plot_fields(xy, p, U, fluid_mask, title: str = "") -> None:
     x = xy[:, :, 0]
     y = xy[:, :, 1]
@@ -71,34 +78,51 @@ def plot_fields(xy, p, U, fluid_mask, title: str = "") -> None:
     p_masked = np.where(fluid_mask > 0.5, p, np.nan)
     u_mag_masked = np.where(fluid_mask > 0.5, u_mag, np.nan)
 
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+    # ParaView-like fixed / robust color limits
+    p_vmin, p_vmax = robust_limits(p_masked, 1.0, 99.0)
+    u_vmin, u_vmax = 0.0, robust_limits(u_mag_masked, 1.0, 99.5)[1]
+
+    fig, axes = plt.subplots(1, 3, figsize=(17, 5))
 
     im0 = axes[0].imshow(
         p_masked,
         origin="lower",
         extent=[x.min(), x.max(), y.min(), y.max()],
-        aspect="auto",
+        aspect="equal",
+        cmap="turbo",
+        vmin=p_vmin,
+        vmax=p_vmax,
     )
-    axes[0].set_title("Pressure p masked")
+    axes[0].set_title(f"Pressure p\nrange: {p_vmin:.2f} to {p_vmax:.2f}")
     plt.colorbar(im0, ax=axes[0])
 
     im1 = axes[1].imshow(
         u_mag_masked,
         origin="lower",
         extent=[x.min(), x.max(), y.min(), y.max()],
-        aspect="auto",
+        aspect="equal",
+        cmap="turbo",
+        vmin=u_vmin,
+        vmax=u_vmax,
     )
-    axes[1].set_title("|U| masked")
+    axes[1].set_title(f"|U|\nrange: {u_vmin:.2f} to {u_vmax:.2f}")
     plt.colorbar(im1, ax=axes[1])
 
     im2 = axes[2].imshow(
         fluid_mask,
         origin="lower",
         extent=[x.min(), x.max(), y.min(), y.max()],
-        aspect="auto",
+        aspect="equal",
+        cmap="gray",
+        vmin=0,
+        vmax=1,
     )
     axes[2].set_title("fluid_mask")
     plt.colorbar(im2, ax=axes[2])
+
+    for ax in axes:
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
 
     plt.suptitle(title)
     plt.tight_layout()

@@ -43,22 +43,22 @@ boundaryField
     }
     airfoil_main
     {
-		type            nutLowReWallFunction;
-		value           uniform 0;
+		type nutkWallFunction;
+		value uniform 0;
     }
 	
 	airfoil_TE
     {
-		type            nutLowReWallFunction;
-		value           uniform 0;
+		type nutkWallFunction;
+		value uniform 0;
     }
 	front
 	{
-		type			empty;
+		type			symmetryPlane;
 	}
 	back
 	{
-		type			empty;
+		type			symmetryPlane;
 	}
 }
 

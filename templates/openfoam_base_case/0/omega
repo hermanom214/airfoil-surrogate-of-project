@@ -40,22 +40,22 @@ boundaryField
     }
     airfoil_main
     {
-        type            omegaWallFunction;
-        value           uniform 10;
+		type omegaWallFunction;
+		value uniform 6.4;
     }
 	airfoil_TE
     {
-        type            omegaWallFunction;
-        value           uniform 10;
+		type omegaWallFunction;
+		value uniform 6.4;
     }
 	
 	front
 	{
-		type			empty;
+		type			symmetryPlane;
 	}
 	back
 	{
-		type			empty;
+		type			symmetryPlane;
 	}
 }
 
