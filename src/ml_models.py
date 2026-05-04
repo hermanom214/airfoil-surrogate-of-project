@@ -37,6 +37,77 @@ class SimpleUNet(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Forward pass (U-Net)
+#
+# Input:
+# x: (B, 5, H, W)
+#
+# Encoder (reduces resolution, increases channels – feature extraction)
+# --------------------------------------------------------------------
+# e1 = enc1(x)
+# → (B, 5, H, W) → (B, 32, H, W)
+#   2× Conv + ReLU, keeps resolution, increases channels
+#
+# e2 = enc2(pool(e1))
+# → pool: (B, 32, H, W) → (B, 32, H/2, W/2)
+# → enc2: (B, 32, H/2, W/2) → (B, 64, H/2, W/2)
+#   downsampling + more feature channels
+#
+# e3 = enc3(pool(e2))
+# → pool: (B, 64, H/2, W/2) → (B, 64, H/4, W/4)
+# → enc3: (B, 64, H/4, W/4) → (B, 128, H/4, W/4)
+#
+# Bottleneck (smallest resolution, highest channel count – global context)
+# -----------------------------------------------------------------------
+# b = bottleneck(pool(e3))
+# → pool: (B, 128, H/4, W/4) → (B, 128, H/8, W/8)
+# → bottleneck: (B, 128, H/8, W/8) → (B, 256, H/8, W/8)
+#
+# Decoder (increases resolution, combines with encoder features)
+# --------------------------------------------------------------
+# d3 = up3(b)
+# → (B, 256, H/8, W/8) → (B, 128, H/4, W/4)
+#   upsampling (ConvTranspose)
+#
+# d3 = cat(d3, e3)
+# → (B, 128, H/4, W/4) + (B, 128, H/4, W/4)
+# → (B, 256, H/4, W/4)
+#   skip connection (restores spatial detail)
+#
+# d3 = dec3(d3)
+# → (B, 256, H/4, W/4) → (B, 128, H/4, W/4)
+#
+# d2 = up2(d3)
+# → (B, 128, H/4, W/4) → (B, 64, H/2, W/2)
+#
+# d2 = cat(d2, e2)
+# → (B, 64, H/2, W/2) + (B, 64, H/2, W/2)
+# → (B, 128, H/2, W/2)
+#
+# d2 = dec2(d2)
+# → (B, 128, H/2, W/2) → (B, 64, H/2, W/2)
+#
+# d1 = up1(d2)
+# → (B, 64, H/2, W/2) → (B, 32, H, W)
+#
+# d1 = cat(d1, e1)
+# → (B, 32, H, W) + (B, 32, H, W)
+# → (B, 64, H, W)
+#
+# d1 = dec1(d1)
+# → (B, 64, H, W) → (B, 32, H, W)
+#
+# Output
+# ------
+# out = self.out(d1)
+# → (B, 32, H, W) → (B, 3, H, W)
+#   1×1 convolution – maps feature maps to physical quantities (e.g. Ux, Uy, p)
+#
+# Summary:
+# encoder → compresses spatial resolution, learns context
+# bottleneck → global representation
+# decoder → restores resolution + recovers details via skip connections
+
         e1 = self.enc1(x)
         e2 = self.enc2(self.pool(e1))
         e3 = self.enc3(self.pool(e2))
