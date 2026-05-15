@@ -2,6 +2,12 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+
+# Global model switch. Keep this at the top for quick toggling.
+DEFAULT_MODEL_NAME = "simple_unet"
+AVAILABLE_MODELS = ("simple_unet", "rans_pinn")
 
 
 class SimpleUNet(nn.Module):
@@ -127,3 +133,159 @@ class SimpleUNet(nn.Module):
         d1 = self.dec1(d1)
 
         return self.out(d1)
+
+
+class PhysicsInformedCNN(nn.Module):
+    """
+    Physics-informed CNN surrogate for 2D steady incompressible airfoil flow.
+
+    Current version predicts [u, v, p] from per-cell input features and uses
+    RANS residual terms (continuity + momentum equations) as a physics loss.
+
+    Project note for SST k-omega turbulence:
+    for our SST k-omega setup, this model must be extended with additional
+    predicted fields k, omega, and nut, and with turbulence transport equations
+    included in the physics residual formulation.
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 5,
+        out_channels: int = 3,
+        hidden_channels: int = 128,
+        depth: int = 6,
+    ):
+        super().__init__()
+
+        if depth < 2:
+            raise ValueError("depth must be >= 2 for PhysicsInformedCNN")
+
+        layers: list[nn.Module] = [
+            nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=1),
+            nn.Tanh(),
+        ]
+
+        for _ in range(depth - 2):
+            layers.extend(
+                [
+                    nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
+                    nn.Tanh(),
+                ]
+            )
+
+        layers.append(nn.Conv2d(hidden_channels, out_channels, kernel_size=3, padding=1))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+    @staticmethod
+    def _ddx(field: torch.Tensor, dx: float) -> torch.Tensor:
+        padded = F.pad(field, (1, 1, 0, 0), mode="replicate")
+        return (padded[:, :, :, 2:] - padded[:, :, :, :-2]) / (2.0 * dx)
+
+    @staticmethod
+    def _ddy(field: torch.Tensor, dy: float) -> torch.Tensor:
+        padded = F.pad(field, (0, 0, 1, 1), mode="replicate")
+        return (padded[:, :, 2:, :] - padded[:, :, :-2, :]) / (2.0 * dy)
+
+    @staticmethod
+    def _laplacian(field: torch.Tensor, dx: float, dy: float) -> torch.Tensor:
+        ddx = PhysicsInformedCNN._ddx(PhysicsInformedCNN._ddx(field, dx), dx)
+        ddy = PhysicsInformedCNN._ddy(PhysicsInformedCNN._ddy(field, dy), dy)
+        return ddx + ddy
+
+    @staticmethod
+    def _erode_mask(mask: torch.Tensor, pixels: int) -> torch.Tensor:
+        if pixels <= 0:
+            return (mask > 0.5).to(mask.dtype)
+
+        binary_mask = (mask > 0.5).to(mask.dtype)
+        inv_mask = 1.0 - binary_mask
+        kernel = 2 * pixels + 1
+        dilated_inv = F.max_pool2d(inv_mask, kernel_size=kernel, stride=1, padding=pixels)
+        eroded = 1.0 - dilated_inv
+        return eroded.clamp(0.0, 1.0)
+
+    @staticmethod
+    def _masked_mse(residual: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        sq = residual.pow(2) * mask
+        denom = mask.sum() + 1e-8
+        return sq.sum() / denom
+
+    def rans_residual_loss(
+        self,
+        pred: torch.Tensor,
+        fluid_mask: torch.Tensor,
+        dx: float,
+        dy: float,
+        nu: float,
+        nu_t: torch.Tensor | None = None,
+        u_scale: float = 50.0,
+        p_scale: float = 1000.0,
+        pressure_is_kinematic: bool = True,
+        mask_erode_pixels: int = 1,
+    ) -> dict[str, torch.Tensor]:
+        """
+        Returns masked loss terms of steady incompressible 2D RANS residuals.
+        """
+
+        u = pred[:, 0:1, :, :] * u_scale
+        v = pred[:, 1:2, :, :] * u_scale
+        p = pred[:, 2:3, :, :] * p_scale
+
+        mask = self._erode_mask(fluid_mask, mask_erode_pixels)
+        if mask.shape[1] != 1:
+            raise ValueError("fluid_mask must have shape [B, 1, H, W]")
+        if mask.shape[0] != pred.shape[0] or mask.shape[2:] != pred.shape[2:]:
+            raise ValueError("fluid_mask must match pred spatial dimensions and batch size")
+
+        du_dx = self._ddx(u, dx)
+        du_dy = self._ddy(u, dy)
+        dv_dx = self._ddx(v, dx)
+        dv_dy = self._ddy(v, dy)
+        dp_dx = self._ddx(p, dx)
+        dp_dy = self._ddy(p, dy)
+
+        if nu_t is None:
+            nu_eff = torch.full_like(u, fill_value=nu)
+        else:
+            nu_eff = nu + nu_t
+
+        continuity = du_dx + dv_dy
+        if pressure_is_kinematic:
+            pressure_x = dp_dx
+            pressure_y = dp_dy
+        else:
+            rho = 1.0
+            pressure_x = (1.0 / rho) * dp_dx
+            pressure_y = (1.0 / rho) * dp_dy
+
+        mom_x = u * du_dx + v * du_dy + pressure_x - nu_eff * self._laplacian(u, dx, dy)
+        mom_y = u * dv_dx + v * dv_dy + pressure_y - nu_eff * self._laplacian(v, dx, dy)
+
+        continuity_loss = self._masked_mse(continuity, mask)
+        mom_x_loss = self._masked_mse(mom_x, mask)
+        mom_y_loss = self._masked_mse(mom_y, mask)
+        total_loss = continuity_loss + mom_x_loss + mom_y_loss
+
+        return {
+            "physics_loss": total_loss,
+            "continuity_loss": continuity_loss,
+            "momentum_x_loss": mom_x_loss,
+            "momentum_y_loss": mom_y_loss,
+        }
+
+
+def build_model(model_name: str = DEFAULT_MODEL_NAME, **kwargs) -> nn.Module:
+    """Factory for selecting a model architecture from AVAILABLE_MODELS."""
+
+    key = model_name.lower().strip()
+    if key == "simple_unet":
+        return SimpleUNet(**kwargs)
+    if key == "rans_pinn":
+        return PhysicsInformedCNN(**kwargs)
+
+    raise ValueError(
+        f"Unsupported model '{model_name}'. Supported models: {', '.join(AVAILABLE_MODELS)}"
+    )
