@@ -66,7 +66,12 @@ def build_single_case(
 
     Vrací cestu na vytvořený case.
     """
-    stl_source = generated_profiles_dir / f"naca{row.naca_code()}.stl"
+    def format_float_for_name(value: float) -> str:
+        return str(value).replace("-", "m").replace(".", "p")
+
+    aoa_name = format_float_for_name(row.aoa_deg)
+    stl_source = generated_profiles_dir / f"naca{row.naca_code()}_aoa{aoa_name}.stl"
+
     if not stl_source.exists():
         raise FileNotFoundError(f"Missing STL file: {stl_source}")
 
@@ -76,7 +81,7 @@ def build_single_case(
     prepare_case_folder(case_dir, template_case)
     copy_stl_to_case(stl_source, case_dir)
 
-    update_u_file(case_dir / "0" / "U", row.inlet_velocity, row.aoa_deg)
+    update_u_file(case_dir / "0" / "U", row.inlet_velocity)
     update_force_coeffs_file(case_dir / "system" / "forceCoeffs", row.inlet_velocity)
 
     write_params_json(case_dir, row, case_id, stl_source)

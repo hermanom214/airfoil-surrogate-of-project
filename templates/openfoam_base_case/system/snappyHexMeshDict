@@ -30,14 +30,7 @@ geometry
             }
         }
     }
-	
-	//refinementBoxAirfoil
-	//{
-	//	type searchableBox;
-	//	min (-0.05 -0.12 -0.06);
-	//	max (1.05  0.12  0.06);
-	//}
-	
+		
 	outerAirfoilBox
 	{
 		type searchableBox;
@@ -66,12 +59,12 @@ geometry
 		max (1.04  0.04  0.06);
 	}
 	
-	trailingEdgeSmallBox
-	{
-		type searchableBox;
-		min (0.98 -0.03 -0.06);
-		max (1.02  0.03  0.06);
-	}
+	//trailingEdgeSmallBox
+	//{
+	//	type searchableBox;
+	//	min (0.98 -0.03 -0.06);
+	//	max (1.02  0.03  0.06);
+	//}
 }
 
 castellatedMeshControls
@@ -127,14 +120,7 @@ castellatedMeshControls
 
     refinementRegions
     {
-	    
-		//refinementBoxAirfoil
-		//{
-		//	mode inside;
-			//levels ((1E15 3));
-		//	levels ((1E15 2));
-		//}
-		
+	    		
 		outerAirfoilBox
 		{
 			mode inside;
@@ -160,12 +146,12 @@ castellatedMeshControls
 			levels ((1E15 3));
 		}
 		
-		trailingEdgeSmallBox
-		{
-			mode inside;
+		//trailingEdgeSmallBox
+		//{
+		//	mode inside;
 			//levels ((1E15 4));
-			levels ((1E15 4));
-		}
+		//	levels ((1E15 4));
+		//}
     }
 
     locationInMesh (2 0 0);

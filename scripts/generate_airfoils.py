@@ -6,6 +6,7 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import List, Tuple
 import sys
+from unittest import case
 
 
 # ============================================================
@@ -22,9 +23,13 @@ PROJECT_ROOT = PATHS.project_root
 OUTPUT_DIR = PATHS.generated_profiles
 CSV_PATH = PATHS.sampling_table
 
-TEST_MODE = True
+TEST_MODE = False
 
 N_POINTS = 241
+
+# Sweep pro CFD podminky (3 rychlosti, 3 AoA).
+AOA_VALUES = [-4.0, 0.0, 4.0]
+INLET_VELOCITY_VALUES = [15.0, 20.0, 25.0]
 
 Z_MIN = -0.05
 Z_MAX = 0.05
@@ -147,6 +152,40 @@ def force_sharp_trailing_edge(
 
     return upper, lower
 
+def rotate_point(
+    point: Tuple[float, float],
+    angle_deg: float,
+    center: Tuple[float, float] = (0.25, 0.0),
+) -> Tuple[float, float]:
+    """
+    Otočí bod kolem zadaného středu.
+
+    center=(0.25, 0.0) odpovídá cca quarter-chord,
+    což je běžný referenční bod pro airfoil AoA.
+    """
+    x, y = point
+    cx, cy = center
+
+    angle_rad = math.radians(angle_deg)
+
+    x0 = x - cx
+    y0 = y - cy
+
+    xr = x0 * math.cos(angle_rad) - y0 * math.sin(angle_rad)
+    yr = x0 * math.sin(angle_rad) + y0 * math.cos(angle_rad)
+
+    return xr + cx, yr + cy
+
+
+def rotate_profile_loop(
+    loop_points: List[Tuple[float, float]],
+    angle_deg: float,
+    center: Tuple[float, float] = (0.25, 0.0),
+) -> List[Tuple[float, float]]:
+    """
+    Otočí celý uzavřený profil o AoA.
+    """
+    return [rotate_point(p, angle_deg, center=center) for p in loop_points]
 
 def build_closed_profile_loop(
     upper_points: List[Tuple[float, float]],
@@ -191,6 +230,14 @@ def triangle_normal(
 
     return nx / norm, ny / norm, nz / norm
 
+def format_float_for_name(value: float) -> str:
+    """
+    Převod čísla do názvu souboru:
+    -4.0 -> m4p0
+     0.0 -> 0p0
+     4.0 -> 4p0
+    """
+    return str(value).replace("-", "m").replace(".", "p")
 
 def write_facet(
     f,
@@ -310,16 +357,18 @@ def write_sampling_table(csv_path: Path, cases: List[AirfoilCase]) -> None:
 # ============================================================
 
 def get_test_cases() -> List[AirfoilCase]:
-    return [
+    base_cases = [
         AirfoilCase(camber_percent=0, camber_position_tenths=0, thickness_percent=12),
         AirfoilCase(camber_percent=2, camber_position_tenths=4, thickness_percent=12),
         AirfoilCase(camber_percent=4, camber_position_tenths=4, thickness_percent=15),
         AirfoilCase(camber_percent=2, camber_position_tenths=2, thickness_percent=8),
     ]
 
+    return expand_cases_with_conditions(base_cases)
+
 
 def get_real_run_cases() -> List[AirfoilCase]:
-    cases: List[AirfoilCase] = []
+    base_cases: List[AirfoilCase] = []
 
     camber_values = [0, 2, 4]
     camber_pos_values = [2, 4]
@@ -341,10 +390,46 @@ def get_real_run_cases() -> List[AirfoilCase]:
                         thickness_percent=thickness,
                     )
 
-                if not any(existing.naca_code() == case.naca_code() for existing in cases):
-                    cases.append(case)
+                if not any(existing.naca_code() == case.naca_code() for existing in base_cases):
+                    base_cases.append(case)
 
-    return cases
+    return expand_cases_with_conditions(base_cases)
+
+
+def expand_cases_with_conditions(base_cases: List[AirfoilCase]) -> List[AirfoilCase]:
+    expanded: List[AirfoilCase] = []
+
+    for case in base_cases:
+        for aoa in AOA_VALUES:
+            for inlet_velocity in INLET_VELOCITY_VALUES:
+                expanded.append(
+                    AirfoilCase(
+                        camber_percent=case.camber_percent,
+                        camber_position_tenths=case.camber_position_tenths,
+                        thickness_percent=case.thickness_percent,
+                        chord=case.chord,
+                        aoa_deg=aoa,
+                        inlet_velocity=inlet_velocity,
+                    )
+                )
+
+    return expanded
+
+
+def unique_geometry_cases(cases: List[AirfoilCase]) -> List[AirfoilCase]:
+    unique_cases: List[AirfoilCase] = []
+    seen: set[tuple[str, float]] = set()
+
+    for case in cases:
+        key = (case.naca_code(), case.aoa_deg)
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        unique_cases.append(case)
+
+    return unique_cases
 
 
 # ============================================================
@@ -354,14 +439,16 @@ def get_real_run_cases() -> List[AirfoilCase]:
 def generate_airfoil_files(cases: List[AirfoilCase], output_dir: Path) -> None:
     ensure_output_dir(output_dir)
 
-    for case in cases:
+    for case in unique_geometry_cases(cases):
         upper, lower = generate_naca4_coordinates(case, n_points=N_POINTS)
         upper, lower = force_sharp_trailing_edge(upper, lower, chord=case.chord)
 
         loop = build_closed_profile_loop(upper, lower)
+        loop = rotate_profile_loop(loop, -case.aoa_deg)
 
-        dat_path = output_dir / f"naca{case.naca_code()}.dat"
-        stl_path = output_dir / f"naca{case.naca_code()}.stl"
+        aoa_name = format_float_for_name(case.aoa_deg)
+        dat_path = output_dir / f"naca{case.naca_code()}_aoa{aoa_name}.dat"
+        stl_path = output_dir / f"naca{case.naca_code()}_aoa{aoa_name}.stl"
 
         write_dat_file(dat_path, case, loop)
         write_ascii_stl(stl_path, case, loop, z_min=Z_MIN, z_max=Z_MAX)
@@ -383,7 +470,10 @@ def main() -> None:
     write_sampling_table(CSV_PATH, cases)
 
     print(f"\nSaved sampling table to: {CSV_PATH}")
-    print(f"Total generated airfoils: {len(cases)}")
+    print(f"Total CFD combinations (geometry x AoA x velocity): {len(cases)}")
+    print(f"Unique generated geometries (DAT/STL): {len(unique_geometry_cases(cases))}")
+    print(f"AoA sweep: {AOA_VALUES}")
+    print(f"Velocity sweep: {INLET_VELOCITY_VALUES}")
     print(f"TE split starts at x/c = {TE_SPLIT_X}")
 
 
