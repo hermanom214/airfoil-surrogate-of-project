@@ -37,20 +37,27 @@ def main() -> None:
         y_min=-5.0,
         y_max=5.0,
 
-        # konzervativní, ale hladký LE sampling
-        n_airfoil_half=240,
-        le_cluster_exp=2.2,
+        # extra smooth LE: dense profile sampling + balanced LE clustering
+        n_airfoil_half=520,
+        le_cluster_exp=2.5,
 
-        n_streamwise_le=120,
-        n_streamwise_near=120,
+        n_streamwise_le=160,
+        n_streamwise_near=180,
         n_wall_normal=80,
         n_wake_x=160,
         n_z=1,
 
-        # stabilnější grading pro první funkční mesh
-        grading_to_wall=250.0,
-        grading_from_wall=0.004,
+        # smooth but still robust wall-normal expansion
+        grading_to_wall=180.0,
+        grading_from_wall=0.006,
         grading_wake_x=6.0,
+
+        # keep geometric LE cap off when using topological LE cap
+        enable_le_cap=False,
+        le_cap_fraction=0.035,
+        le_cap_power=1.2,
+        le_topology_fraction=0.028,
+        n_le_cap_normal=28,
 
         # původní topologie tohle pořád potřebuje
         wake_cut_length=0.03,

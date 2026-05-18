@@ -28,7 +28,9 @@ class CGridBlockMeshConfig:
     y_max: float = 5.0
 
     n_airfoil_half: int = 80
+    le_cluster_exp: float = 2.5
 
+    n_streamwise_le: int = 60  # Fine refinement in LE cluster block
     n_streamwise_near: int = 100
     n_wall_normal: int = 80
     n_wake_x: int = 120
@@ -43,12 +45,45 @@ class CGridBlockMeshConfig:
     # Keep small for first tests.
     wake_cut_length: float = 0.03
 
+    # Geometric leading-edge cap smoothing (keeps topology unchanged).
+    # This primarily targets the first few cells near LE.
+    enable_le_cap: bool = True
+    le_cap_fraction: float = 0.03
+    le_cap_power: float = 1.15
+
+    # Topological LE cap (removes the singular LE vertex in block topology).
+    le_topology_fraction: float = 0.028
+    n_le_cap_normal: int = 28
+
 
 def cosine_spacing(n: int) -> List[float]:
     return [
         0.5 * (1.0 - math.cos(math.pi * i / (n - 1)))
         for i in range(n)
     ]
+
+
+def le_clustered_spacing(n: int, cluster_exp: float = 2.5) -> List[float]:
+    """Cosine spacing with clustering near leading edge.
+    cluster_exp > 1: more clustering at x=0 (LE).
+    cluster_exp = 1: same as regular cosine spacing.
+    """
+    base = cosine_spacing(n)
+    if cluster_exp <= 0.0:
+        raise ValueError("cluster_exp must be > 0")
+
+    xs = [x ** cluster_exp for x in base]
+
+    # Smooth only the first few parametric steps near LE to avoid visible
+    # jagged transition in the first cells while keeping strong LE clustering.
+    prefix = min(8, max(4, n // 40))
+    if prefix >= 3 and prefix < n:
+        anchor = xs[prefix - 1]
+        for i in range(1, prefix - 1):
+            s = i / (prefix - 1)
+            xs[i] = anchor * (s**1.6)
+
+    return xs
 
 
 def thickness_distribution(x: float, thickness_fraction: float) -> float:
@@ -85,8 +120,9 @@ def camber_line_and_slope(
 def generate_naca4_upper_lower(
     params: NACA4Params,
     n_points: int,
+    le_cluster_exp: float = 2.5,
 ) -> tuple[List[Point2D], List[Point2D]]:
-    xs = cosine_spacing(n_points)
+    xs = le_clustered_spacing(n_points, cluster_exp=le_cluster_exp)
 
     m = params.camber_percent / 100.0
     p = params.camber_position_tenths / 10.0
@@ -116,6 +152,51 @@ def generate_naca4_upper_lower(
     lower[-1] = (c, y_te)
 
     return upper, lower
+
+
+def apply_geometric_le_cap(
+    upper: List[Point2D],
+    lower: List[Point2D],
+    cap_fraction: float,
+    cap_power: float,
+) -> tuple[List[Point2D], List[Point2D]]:
+    """Replace first LE points by a smooth elliptical cap on each side.
+
+    This reduces visible faceting in the first cells around the singular LE point
+    while preserving the original block topology.
+    """
+    if not (0.0 < cap_fraction < 0.2):
+        return upper, lower
+
+    n = min(len(upper), len(lower))
+    if n < 12:
+        return upper, lower
+
+    k = max(4, min(int(cap_fraction * (n - 1)), (n - 1) // 6))
+    if k < 2:
+        return upper, lower
+
+    xu_end, yu_end = upper[k]
+    xl_end, yl_end = lower[k]
+
+    yu_abs = abs(yu_end)
+    yl_abs = abs(yl_end)
+    if xu_end <= 0.0 or xl_end <= 0.0 or yu_abs <= 0.0 or yl_abs <= 0.0:
+        return upper, lower
+
+    new_upper = upper[:]
+    new_lower = lower[:]
+
+    for i in range(k + 1):
+        s = i / k
+        t = (s**max(0.5, cap_power)) * (0.5 * math.pi)
+
+        # Elliptic LE cap parameterization: x = a(1-cos t), y = b sin t.
+        # It gives near-vertical tangent at LE and smooth transition to side.
+        new_upper[i] = (xu_end * (1.0 - math.cos(t)), yu_abs * math.sin(t))
+        new_lower[i] = (xl_end * (1.0 - math.cos(t)), -yl_abs * math.sin(t))
+
+    return new_upper, new_lower
 
 
 def rotate_point(
@@ -148,9 +229,22 @@ def point3(p: Point2D, z: float) -> Point3D:
     return p[0], p[1], z
 
 
-def fmt_polyline(start: int, end: int, points: List[Point2D], z: float) -> str:
-    out = [f"    polyLine {start} {end}", "    ("]
-    for x, y in points:
+def fmt_curve(
+    start: int,
+    end: int,
+    points: List[Point2D],
+    z: float,
+    curve_type: str = "spline",
+) -> str:
+    out = [f"    {curve_type} {start} {end}", "    ("]
+
+    # For spline, OpenFOAM expects interpolation points between start/end vertices.
+    if curve_type == "spline" and len(points) >= 2:
+        pts = points[1:-1]
+    else:
+        pts = points
+
+    for x, y in pts:
         out.append(f"        ({x:.8f} {y:.8f} {z:.8f})")
     out.append("    )")
     return "\n".join(out)
@@ -164,18 +258,41 @@ def build_cgrid_blockmesh_dict(
     upper, lower = generate_naca4_upper_lower(
         params=naca,
         n_points=cfg.n_airfoil_half,
+        le_cluster_exp=cfg.le_cluster_exp,
     )
+
+    if cfg.enable_le_cap:
+        upper, lower = apply_geometric_le_cap(
+            upper=upper,
+            lower=lower,
+            cap_fraction=cfg.le_cap_fraction,
+            cap_power=cfg.le_cap_power,
+        )
 
     # Same convention as rotated STL after correction:
     # positive AoA -> nose up.
     upper = rotate_points(upper, -aoa_deg)
     lower = rotate_points(lower, -aoa_deg)
 
-    le = rotate_point((0.0, 0.0), -aoa_deg)
     te = rotate_point((naca.chord, 0.0), -aoa_deg)
 
-    lower_mid = lower[len(lower) // 2]
-    upper_mid = upper[len(upper) // 2]
+    n_pts = min(len(upper), len(lower))
+    mid_idx = n_pts // 2
+
+    # Choose cap extent by physical x-location, not only by point index.
+    # This keeps the topological cap very small even with heavy LE clustering.
+    x_cap_target = naca.chord * max(0.004, min(cfg.le_topology_fraction, 0.06))
+    cap_idx = 2
+    for i in range(2, mid_idx - 1):
+        if upper[i][0] >= x_cap_target and lower[i][0] >= x_cap_target:
+            cap_idx = i
+            break
+
+    lower_cap = lower[cap_idx]
+    upper_cap = upper[cap_idx]
+
+    lower_mid = lower[mid_idx]
+    upper_mid = upper[mid_idx]
 
     # Small wake-cut point behind TE.
     # This follows the topology idea from the reference blockMesh.
@@ -184,45 +301,21 @@ def build_cgrid_blockmesh_dict(
     zf = cfg.z_half
     zb = -cfg.z_half
 
-    # Keep inlet as a flat plane at x = x_min.
+    # Keep upstream split on inlet plane to avoid skewed/triangular inlet patch.
     x_mid = cfg.x_min
     x_te = te[0]
-    y_te_cut = te_cut[1]
 
-    # Vertex numbering intentionally follows the reference topology style.
-    vertices_2d: List[Point2D] = [
-        le,                          # 0
-        lower_mid,                   # 1
-        te_cut,                      # 2
-        upper_mid,                   # 3
-
-        le,                          # 4 back copy starts later, placeholder not used here
-    ]
-
-    # Explicit front vertices.
-    front_2d: List[Point2D] = [
-        le,                              # 0
-        lower_mid,                       # 1
-        te_cut,                          # 2
-        upper_mid,                       # 3
-
-        # back-side airfoil vertices are added separately as 4-7 in original topology
-    ]
-
-    # We need the exact reference numbering:
-    # 0-3 front airfoil control
-    # 4-7 back airfoil control
-    # 8-15 farfield lower/upper rectangles
-    # 16-19 inlet/outlet midline
-    # 20-23 TE vertical farfield line
-    # 24-29 duplicate wake interface vertices
+    # Topological LE cap indexing:
+    # 0: lower cap point (front), 24: upper cap point (front)
+    # 4/25: corresponding back points
+    # 26-29: inlet points aligned with lower/upper cap y-levels
     all_front_back: List[Point3D] = [
-        point3(le, zf),                 # 0
+        point3(lower_cap, zf),          # 0
         point3(lower_mid, zf),          # 1
         point3(te_cut, zf),             # 2
         point3(upper_mid, zf),          # 3
 
-        point3(le, zb),                 # 4
+        point3(lower_cap, zb),          # 4
         point3(lower_mid, zb),          # 5
         point3(te_cut, zb),             # 6
         point3(upper_mid, zb),          # 7
@@ -248,13 +341,22 @@ def build_cgrid_blockmesh_dict(
         point3((x_te, cfg.y_max), zb),  # 22
         point3((x_te, cfg.y_min), zb),  # 23
 
+        point3(upper_cap, zf),          # 24
+        point3(upper_cap, zb),          # 25
+
+        point3((x_mid, lower_cap[1]), zf),  # 26
+        point3((x_mid, upper_cap[1]), zf),  # 27
+        point3((x_mid, lower_cap[1]), zb),  # 28
+        point3((x_mid, upper_cap[1]), zb),  # 29
     ]
 
-    lower_le_mid = lower[: len(lower) // 2 + 1]
-    lower_mid_te = lower[len(lower) // 2 :] + [te_cut]
+    lower_cap_mid = lower[cap_idx: mid_idx + 1]
+    lower_mid_te = lower[mid_idx:] + [te_cut]
+    upper_cap_mid = upper[cap_idx: mid_idx + 1]
+    upper_mid_te = upper[mid_idx:] + [te_cut]
 
-    upper_le_mid = upper[: len(upper) // 2 + 1]
-    upper_mid_te = upper[len(upper) // 2 :] + [te_cut]
+    # Nose curve from lower cap -> LE -> upper cap.
+    le_nose_curve = list(reversed(lower[: cap_idx + 1])) + upper[1: cap_idx + 1]
 
     text = """FoamFile
 {
@@ -277,13 +379,18 @@ vertices
 
 blocks
 (
-    // upper upstream / leading-edge block
-    hex (0 16 11 3 4 18 15 7)
+    // upper upstream block
+    hex (24 27 11 3 25 29 15 7)
         ({cfg.n_streamwise_near} {cfg.n_wall_normal} {cfg.n_z})
         simpleGrading ({cfg.grading_to_wall} {cfg.grading_from_wall} 1)
 
-    // lower upstream / leading-edge block
-    hex (0 1 8 16 4 5 12 18)
+    // topological LE cap block
+    hex (0 26 27 24 4 28 29 25)
+        ({cfg.n_streamwise_near} {cfg.n_le_cap_normal} {cfg.n_z})
+        simpleGrading ({cfg.grading_to_wall} 1 1)
+
+    // lower upstream block
+    hex (0 1 8 26 4 5 12 28)
         ({cfg.n_wall_normal} {cfg.n_streamwise_near} {cfg.n_z})
         simpleGrading ({cfg.grading_from_wall} {cfg.grading_to_wall} 1)
 
@@ -312,15 +419,17 @@ edges
 (
 """
 
-    text += fmt_polyline(0, 1, lower_le_mid, zf) + "\n\n"
-    text += fmt_polyline(1, 2, lower_mid_te, zf) + "\n\n"
-    text += fmt_polyline(0, 3, upper_le_mid, zf) + "\n\n"
-    text += fmt_polyline(3, 2, upper_mid_te, zf) + "\n\n"
+    text += fmt_curve(0, 1, lower_cap_mid, zf, curve_type="spline") + "\n\n"
+    text += fmt_curve(1, 2, lower_mid_te, zf, curve_type="spline") + "\n\n"
+    text += fmt_curve(24, 3, upper_cap_mid, zf, curve_type="spline") + "\n\n"
+    text += fmt_curve(3, 2, upper_mid_te, zf, curve_type="spline") + "\n\n"
+    text += fmt_curve(0, 24, le_nose_curve, zf, curve_type="spline") + "\n\n"
 
-    text += fmt_polyline(4, 5, lower_le_mid, zb) + "\n\n"
-    text += fmt_polyline(5, 6, lower_mid_te, zb) + "\n\n"
-    text += fmt_polyline(4, 7, upper_le_mid, zb) + "\n\n"
-    text += fmt_polyline(7, 6, upper_mid_te, zb) + "\n"
+    text += fmt_curve(4, 5, lower_cap_mid, zb, curve_type="spline") + "\n\n"
+    text += fmt_curve(5, 6, lower_mid_te, zb, curve_type="spline") + "\n\n"
+    text += fmt_curve(25, 7, upper_cap_mid, zb, curve_type="spline") + "\n\n"
+    text += fmt_curve(7, 6, upper_mid_te, zb, curve_type="spline") + "\n"
+    text += fmt_curve(4, 25, le_nose_curve, zb, curve_type="spline") + "\n"
 
     text += f""");
 
@@ -332,8 +441,9 @@ boundary
         type patch;
         faces
         (
-            (16 11 15 18)
-            (16 18 12 8)
+            (27 11 15 29)
+            (26 27 29 28)
+            (8 26 28 12)
         );
     }}
 
@@ -352,19 +462,21 @@ boundary
         type empty;
         faces
         (
-            (0 3 11 16)
-            (0 16 8 1)
+            (24 3 11 27)
+            (0 24 27 26)
+            (0 26 8 1)
             (1 8 21 2)
             (3 2 20 11)
             (2 17 10 20)
             (2 21 9 17)
 
-            (4 18 15 7)
-            (4 5 12 18)
-            (7 15 22 6)
-            (5 6 23 12)
-            (6 22 14 19)
-            (6 19 13 23)
+            (25 7 15 29)
+            (4 25 29 28)
+            (4 28 12 5)
+            (7 6 22 15)
+            (5 12 23 6)
+            (6 19 14 22)
+            (6 23 13 19)
         );
     }}
 
@@ -373,10 +485,11 @@ boundary
         type wall;
         faces
         (
-            (0 3 7 4)
+            (24 3 7 25)
+            (0 24 25 4)
             (0 4 5 1)
             (3 2 6 7)
-            (1 5 6 2)
+            (1 2 6 5)
         );
     }}
 
