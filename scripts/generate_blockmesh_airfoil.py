@@ -44,13 +44,13 @@ def main() -> None:
         n_streamwise_le=160,
         n_streamwise_near=180,
         n_wall_normal=80,
-        n_wake_x=160,
+        n_wake_x=220,
         n_z=1,
 
         # smooth but still robust wall-normal expansion
         grading_to_wall=180.0,
         grading_from_wall=0.006,
-        grading_wake_x=6.0,
+        grading_wake_x=2.5,
 
         # keep geometric LE cap off when using topological LE cap
         enable_le_cap=False,
@@ -59,8 +59,8 @@ def main() -> None:
         le_topology_fraction=0.028,
         n_le_cap_normal=28,
 
-        # původní topologie tohle pořád potřebuje
-        wake_cut_length=0.03,
+        # larger wake cut to smooth TE transition and preserve streamwise direction
+        wake_cut_length=0.08,
     )
 
     write_blockmesh_dict(
