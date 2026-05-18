@@ -37,17 +37,19 @@ def main() -> None:
         y_min=-5.0,
         y_max=5.0,
 
-        # zvýšené rozlišení profilu
-        n_airfoil_half=200,
+        # konzervativní, ale hladký LE sampling
+        n_airfoil_half=240,
+        le_cluster_exp=2.2,
 
+        n_streamwise_le=120,
         n_streamwise_near=120,
         n_wall_normal=80,
         n_wake_x=160,
         n_z=1,
 
-        # mírnější grading než 800
-        grading_to_wall=400.0,
-        grading_from_wall=0.0025,
+        # stabilnější grading pro první funkční mesh
+        grading_to_wall=250.0,
+        grading_from_wall=0.004,
         grading_wake_x=6.0,
 
         # původní topologie tohle pořád potřebuje
