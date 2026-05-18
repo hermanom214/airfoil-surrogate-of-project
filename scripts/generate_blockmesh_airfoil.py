@@ -43,13 +43,14 @@ def main() -> None:
 
         n_streamwise_le=160,
         n_streamwise_near=180,
-        n_wall_normal=80,
+        n_wall_normal=140,
         n_wake_x=220,
         n_z=1,
 
         # smooth but still robust wall-normal expansion
-        grading_to_wall=180.0,
+        grading_to_wall=2000.0,
         grading_from_wall=0.006,
+        grading_le_tangent=0.45,
         grading_wake_x=2.5,
 
         # keep geometric LE cap off when using topological LE cap
@@ -57,7 +58,7 @@ def main() -> None:
         le_cap_fraction=0.035,
         le_cap_power=1.2,
         le_topology_fraction=0.028,
-        n_le_cap_normal=28,
+        n_le_cap_normal=36,
 
         # larger wake cut to smooth TE transition and preserve streamwise direction
         wake_cut_length=0.08,

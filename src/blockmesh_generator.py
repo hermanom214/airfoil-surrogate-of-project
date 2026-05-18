@@ -39,6 +39,7 @@ class CGridBlockMeshConfig:
 
     grading_to_wall: float = 800.0
     grading_from_wall: float = 0.00125
+    grading_le_tangent: float = 0.45
     grading_wake_x: float = 8.0
 
     # Small artificial wake cut behind TE for block topology.
@@ -53,7 +54,7 @@ class CGridBlockMeshConfig:
 
     # Topological LE cap (removes the singular LE vertex in block topology).
     le_topology_fraction: float = 0.028
-    n_le_cap_normal: int = 28
+    n_le_cap_normal: int = 24
 
 
 def cosine_spacing(n: int) -> List[float]:
@@ -382,7 +383,7 @@ blocks
     // upper upstream block
     hex (24 27 11 3 25 29 15 7)
         ({cfg.n_streamwise_near} {cfg.n_wall_normal} {cfg.n_z})
-        simpleGrading ({cfg.grading_to_wall} {cfg.grading_from_wall} 1)
+        simpleGrading ({cfg.grading_to_wall} {cfg.grading_le_tangent} 1)
 
     // topological LE cap block
     hex (0 26 27 24 4 28 29 25)
@@ -392,7 +393,7 @@ blocks
     // lower upstream block
     hex (0 1 8 26 4 5 12 28)
         ({cfg.n_wall_normal} {cfg.n_streamwise_near} {cfg.n_z})
-        simpleGrading ({cfg.grading_from_wall} {cfg.grading_to_wall} 1)
+        simpleGrading ({cfg.grading_le_tangent} {cfg.grading_to_wall} 1)
 
     // upper airfoil-to-TE block
     hex (3 11 20 2 7 15 22 6)
