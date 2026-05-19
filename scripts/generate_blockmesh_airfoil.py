@@ -41,17 +41,17 @@ def main() -> None:
         n_airfoil_half=520,
         le_cluster_exp=2.8,
 
-        n_streamwise_le=160,
-        n_streamwise_near=180,
-        n_wall_normal=140,
-        n_wake_x=220,
+        n_streamwise_le=180,
+        n_streamwise_near=220,
+        n_wall_normal=150,
+        n_wake_x=260,
         n_z=1,
 
-        # smooth but still robust wall-normal expansion
-        grading_to_wall=2000.0,
+        # smoother growth while keeping near-wall spacing close to y+~1 target
+        grading_to_wall=1600.0,
         grading_from_wall=0.006,
-        grading_le_tangent=0.45,
-        grading_wake_x=2.5,
+        grading_le_tangent=0.65,
+        grading_wake_x=1.8,
 
         # keep geometric LE cap off when using topological LE cap
         enable_le_cap=False,
@@ -60,8 +60,8 @@ def main() -> None:
         le_topology_fraction=0.028,
         n_le_cap_normal=42,
 
-        # larger wake cut to smooth TE transition and preserve streamwise direction
-        wake_cut_length=0.08,
+        # Keep TE wake cut short to avoid visible angle kink before last wall cell.
+        wake_cut_length=0.015,
     )
 
     write_blockmesh_dict(
