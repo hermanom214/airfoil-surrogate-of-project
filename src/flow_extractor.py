@@ -403,9 +403,9 @@ def generate_naca4_polygon(
     polygon = Polygon(coords)
 
     if aoa_deg != 0.0:
-        # Rotate around quarter-chord point (same as in generate_airfoils.py)
+        # Match the CFD geometry/sign convention used by the generated cases.
         cx = 0.25 * chord
-        polygon = affinity.rotate(polygon, aoa_deg, origin=(cx, 0.0), use_radians=False)
+        polygon = affinity.rotate(polygon, -aoa_deg, origin=(cx, 0.0), use_radians=False)
 
     return polygon
 
