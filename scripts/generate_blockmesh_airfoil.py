@@ -39,7 +39,7 @@ def main() -> None:
 
         # extra smooth LE: dense profile sampling + balanced LE clustering
         n_airfoil_half=520,
-        le_cluster_exp=2.5,
+        le_cluster_exp=2.8,
 
         n_streamwise_le=160,
         n_streamwise_near=180,
@@ -58,7 +58,7 @@ def main() -> None:
         le_cap_fraction=0.035,
         le_cap_power=1.2,
         le_topology_fraction=0.028,
-        n_le_cap_normal=36,
+        n_le_cap_normal=42,
 
         # larger wake cut to smooth TE transition and preserve streamwise direction
         wake_cut_length=0.08,
