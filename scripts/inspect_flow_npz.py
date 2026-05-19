@@ -5,14 +5,8 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 
-FILES = [
-    r"D:\Martina\REPOS\airfoil_OF_ML_project\airfoil-surrogate-of-project\data\flow_fields\case_0001_naca0012_aoa0p0_u20p0_flow.npz",
-    r"D:\Martina\REPOS\airfoil_OF_ML_project\airfoil-surrogate-of-project\data\flow_fields\case_0002_naca2412_aoa0p0_u20p0_flow.npz",
-    r"D:\Martina\REPOS\airfoil_OF_ML_project\airfoil-surrogate-of-project\data\flow_fields\case_0003_naca4415_aoa0p0_u20p0_flow.npz",
-    r"D:\Martina\REPOS\airfoil_OF_ML_project\airfoil-surrogate-of-project\data\flow_fields\case_0004_naca2208_aoa0p0_u20p0_flow.npz"
-]
-
-FILE_PATH = Path(FILES[1])
+FLOW_FIELDS_DIR = Path(__file__).parent.parent / "data" / "flow_fields"
+PICTURES_DIR = Path(__file__).parent.parent / "data" / "pictures"
 
 
 def print_stats(name: str, arr: np.ndarray) -> None:
@@ -69,7 +63,7 @@ def robust_limits(arr: np.ndarray, low: float = 1.0, high: float = 99.0):
     return np.percentile(valid, low), np.percentile(valid, high)
 
 
-def plot_fields(xy, p, U, fluid_mask, title: str = "") -> None:
+def plot_fields(xy, p, U, fluid_mask, title: str = "", save_path: Path | None = None) -> None:
     x = xy[:, :, 0]
     y = xy[:, :, 1]
 
@@ -126,28 +120,31 @@ def plot_fields(xy, p, U, fluid_mask, title: str = "") -> None:
 
     plt.suptitle(title)
     plt.tight_layout()
-    plt.show()
+    if save_path is not None:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+    else:
+        plt.show()
 
 
 def main() -> None:
-    if not FILE_PATH.exists():
-        raise FileNotFoundError(FILE_PATH)
+    npz_files = sorted(FLOW_FIELDS_DIR.glob("*.npz"))
+    if not npz_files:
+        raise FileNotFoundError(f"No .npz files found in {FLOW_FIELDS_DIR}")
 
-    print(f"[INFO] Loading: {FILE_PATH}")
+    PICTURES_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"[INFO] Found {len(npz_files)} file(s). Saving images to: {PICTURES_DIR}")
 
-    xy, p, U, fluid_mask = load_npz(FILE_PATH)
-
-    validate_shapes(xy, p, U, fluid_mask)
-
-    print_stats("Pressure p", p)
-    print_stats("Velocity Ux", U[:, :, 0])
-    print_stats("Velocity Uy", U[:, :, 1])
-    print_stats("fluid_mask", fluid_mask)
-
-    solid_fraction = 1.0 - float(np.mean(fluid_mask))
-    print(f"\nSolid fraction: {solid_fraction:.6f}")
-
-    plot_fields(xy, p, U, fluid_mask, title=FILE_PATH.name)
+    for file_path in npz_files:
+        print(f"[INFO] Processing: {file_path.name}")
+        try:
+            xy, p, U, fluid_mask = load_npz(file_path)
+            validate_shapes(xy, p, U, fluid_mask)
+            save_path = PICTURES_DIR / (file_path.stem + ".png")
+            plot_fields(xy, p, U, fluid_mask, title=file_path.name, save_path=save_path)
+            print(f"  -> saved: {save_path.name}")
+        except Exception as exc:
+            print(f"  [ERROR] {file_path.name}: {exc}")
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ from src.case_runner import run_command, discover_case_dirs
 import pyvista as pv
 
 from shapely.geometry import Point, Polygon
+from shapely import affinity
 
 @dataclass
 class FlowExtractionResult:
@@ -294,11 +295,13 @@ def extract_single_case(
 
     naca_code = str(params["naca_code"])
     chord = float(params.get("chord", 1.0))
+    aoa_deg = float(params.get("aoa_deg", 0.0))
 
     fluid_mask = create_fluid_mask(
         xy_grid=xy_grid,
         naca_code=naca_code,
         chord=chord,
+        aoa_deg=aoa_deg,
     )
 
     output_file = output_root / f"{case_id}_flow.npz"
@@ -352,6 +355,7 @@ def generate_naca4_polygon(
     naca_code: str,
     chord: float = 1.0,
     n_points: int = 300,
+    aoa_deg: float = 0.0,
 ) -> Polygon:
     m = int(naca_code[0]) / 100.0
     p = int(naca_code[1]) / 10.0
@@ -396,16 +400,25 @@ def generate_naca4_polygon(
 
     coords = upper + lower
 
-    return Polygon(coords)
+    polygon = Polygon(coords)
+
+    if aoa_deg != 0.0:
+        # Rotate around quarter-chord point (same as in generate_airfoils.py)
+        cx = 0.25 * chord
+        polygon = affinity.rotate(polygon, aoa_deg, origin=(cx, 0.0), use_radians=False)
+
+    return polygon
 
 def create_fluid_mask(
     xy_grid: np.ndarray,
     naca_code: str,
     chord: float = 1.0,
+    aoa_deg: float = 0.0,
 ) -> np.ndarray:
     polygon = generate_naca4_polygon(
         naca_code=naca_code,
         chord=chord,
+        aoa_deg=aoa_deg,
     )
 
     ny, nx, _ = xy_grid.shape
