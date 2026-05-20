@@ -20,7 +20,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from src.config import load_paths
 from src.ml_dataset import AirfoilFlowDataset
 from src.ml_models import DEFAULT_MODEL_NAME, build_model
-from src.ml_training import evaluate, masked_mse
+from src.ml_training import evaluate, masked_mse, train_one_epoch
 from src.ml_validation import plot_loss_curves
 
 
@@ -131,6 +131,7 @@ def train_one_epoch_physics(
             p_scale=1000.0,
             pressure_is_kinematic=True,
         )
+
         loss_total = loss_data + physics_weight * phys["physics_loss"]
 
         optimizer.zero_grad()
@@ -203,6 +204,11 @@ def main() -> None:
     # Initialise selected model and Adam optimiser
     model = build_model(DEFAULT_MODEL_NAME).to(device)
     print(f"[INFO] Model: {DEFAULT_MODEL_NAME}")
+    use_physics = DEFAULT_MODEL_NAME == "rans_pinn"
+    if use_physics:
+        print("[INFO] Physics loss enabled for this model")
+    else:
+        print("[INFO] Physics loss disabled for this model; using masked data loss only")
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 
     # Accumulators for loss history (used for the final plot)
@@ -216,16 +222,27 @@ def main() -> None:
         else:
             physics_weight = PHYSICS_LOSS_WEIGHT
 
-        train_metrics = train_one_epoch_physics(
-            model=model,
-            loader=train_loader,
-            optimizer=optimizer,
-            device=device,
-            dx=dx,
-            dy=dy,
-            nu=NU,
-            physics_weight=physics_weight,
-        )
+        if use_physics:
+            train_metrics = train_one_epoch_physics(
+                model=model,
+                loader=train_loader,
+                optimizer=optimizer,
+                device=device,
+                dx=dx,
+                dy=dy,
+                nu=NU,
+                physics_weight=physics_weight,
+            )
+        else:
+            loss_total = train_one_epoch(model, train_loader, optimizer, device)
+            train_metrics = {
+                "loss_total": loss_total,
+                "loss_data": loss_total,
+                "loss_physics": 0.0,
+                "loss_continuity": 0.0,
+                "loss_momentum_x": 0.0,
+                "loss_momentum_y": 0.0,
+            }
         val_loss = evaluate(model, val_loader, device)                        # Evaluate on validation set
 
         train_history.append(train_metrics["loss_total"])
