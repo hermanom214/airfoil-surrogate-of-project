@@ -56,6 +56,11 @@ class CGridBlockMeshConfig:
     le_topology_fraction: float = 0.028
     n_le_cap_normal: int = 24
 
+    # Chord-wise location where the near-TE sub-curve starts.
+    # Using physical x-location avoids index-based artifacts when LE clustering
+    # is strong (index midpoint may sit too close to LE).
+    te_transition_fraction: float = 0.82
+
 
 def cosine_spacing(n: int) -> List[float]:
     return [
@@ -278,7 +283,13 @@ def build_cgrid_blockmesh_dict(
     te = rotate_point((naca.chord, 0.0), -aoa_deg)
 
     n_pts = min(len(upper), len(lower))
+
+    x_te_transition = naca.chord * max(0.55, min(cfg.te_transition_fraction, 0.98))
     mid_idx = n_pts // 2
+    for i in range(2, n_pts - 2):
+        if upper[i][0] >= x_te_transition and lower[i][0] >= x_te_transition:
+            mid_idx = i
+            break
 
     # Choose cap extent by physical x-location, not only by point index.
     # This keeps the topological cap very small even with heavy LE clustering.
