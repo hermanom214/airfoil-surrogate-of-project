@@ -351,7 +351,7 @@ def write_flow_index(results: list[FlowExtractionResult], output_csv: Path) -> N
 def generate_naca4_polygon(
     naca_code: str,
     chord: float = 1.0,
-    n_points: int = 300,
+    n_points: int = 1200,
 ) -> Polygon:
     m = int(naca_code[0]) / 100.0
     p = int(naca_code[1]) / 10.0

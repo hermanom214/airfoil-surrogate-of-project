@@ -9,6 +9,7 @@ sys.path.append(str(PROJECT_ROOT))
 
 from src.case_builder import build_single_blockmesh_case  # noqa: E402
 from src.config import load_paths  # noqa: E402
+from src.generate_sampling_table import generate_sampling_table  # noqa: E402
 from src.sampling import load_sampling_table  # noqa: E402
 
 
@@ -23,6 +24,19 @@ def main() -> None:
     config_path = project_root / "configs" / "paths.yaml"
 
     paths = load_paths(config_path)
+
+    # Ensure geometry folders exist even if they were not created beforehand.
+    geometry_root = paths.generated_profiles.parent
+    geometry_root.mkdir(parents=True, exist_ok=True)
+    paths.generated_profiles.mkdir(parents=True, exist_ok=True)
+
+    # Auto-generate sampling table if it does not exist yet.
+    if not paths.sampling_table.exists():
+        n = generate_sampling_table(paths.sampling_table)
+        print(f"[INFO] Generated sampling table: {paths.sampling_table} ({n} rows)")
+    else:
+        print(f"[INFO] Using existing sampling table: {paths.sampling_table}")
+
     rows = load_sampling_table(paths.sampling_table)
 
     template_case = project_root / "templates" / "openfoam_base_case_yPlus1"

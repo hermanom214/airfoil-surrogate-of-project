@@ -27,7 +27,7 @@ def main() -> None:
     config_path = PROJECT_ROOT / "configs" / "paths.yaml"
     paths = load_paths(config_path)
 
-    cases_root = paths.openfoam_case_sim
+    cases_root = paths.openfoam_case_sim / "blockmesh_cases"
     output_csv = cases_root / "run_status.csv"
 
     case_dirs = discover_case_dirs(cases_root)

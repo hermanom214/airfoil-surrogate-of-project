@@ -17,14 +17,20 @@ from src.flow_extractor import (
 
 
 MAX_WORKERS = 1
+EXTRACT_NX = 640
+EXTRACT_NY = 320
+EXTRACT_X_MIN = -0.75
+EXTRACT_X_MAX = 1.75
+EXTRACT_Y_MIN = -0.75
+EXTRACT_Y_MAX = 0.75
 
 
 def main() -> None:
     config_path = PROJECT_ROOT / "configs" / "paths.yaml"
     paths = load_paths(config_path)
 
-    cases_root = paths.openfoam_case_sim
-    output_root = PROJECT_ROOT / "data" / "flow_fields"
+    cases_root = paths.openfoam_case_sim / "blockmesh_cases"
+    output_root = paths.flow_fields_output
     index_csv = output_root / "flow_dataset_index.csv"
 
     case_dirs = discover_case_dirs(cases_root)
@@ -37,6 +43,12 @@ def main() -> None:
     print(f"[INFO] Nalezeno {len(case_dirs)} case(s).")
     print(f"[INFO] Flow output root: {output_root}")
     print(f"[INFO] Running extraction with MAX_WORKERS={MAX_WORKERS}")
+    print(
+        "[INFO] Extraction grid: "
+        f"{EXTRACT_NX}x{EXTRACT_NY}, "
+        f"x=[{EXTRACT_X_MIN}, {EXTRACT_X_MAX}], "
+        f"y=[{EXTRACT_Y_MIN}, {EXTRACT_Y_MAX}]"
+    )
 
     results = []
 
@@ -46,12 +58,12 @@ def main() -> None:
                 extract_single_case,
                 case_dir,
                 output_root,
-                256,
-                128,
-                -0.5,
-                1.5,
-                -0.5,
-                0.5,
+                EXTRACT_NX,
+                EXTRACT_NY,
+                EXTRACT_X_MIN,
+                EXTRACT_X_MAX,
+                EXTRACT_Y_MIN,
+                EXTRACT_Y_MAX,
             ): case_dir
             for case_dir in case_dirs
         }

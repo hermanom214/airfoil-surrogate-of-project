@@ -42,6 +42,13 @@ class CGridBlockMeshConfig:
     grading_le_tangent: float = 0.45
     grading_wake_x: float = 8.0
 
+    # Far downstream extension - new blocks added after x_max.
+    # Cell sizes start where the near-wake ends and expand gently further
+    # downstream without affecting the mesh around the airfoil.
+    x_far: float = 20.0
+    n_far_wake_x: int = 80
+    grading_far_wake_x: float = 4.0
+
     # Small artificial wake cut behind TE for block topology.
     # Keep small for first tests.
     wake_cut_length: float = 0.03
@@ -360,6 +367,14 @@ def build_cgrid_blockmesh_dict(
         point3((x_mid, upper_cap[1]), zf),  # 27
         point3((x_mid, lower_cap[1]), zb),  # 28
         point3((x_mid, upper_cap[1]), zb),  # 29
+
+        # Far downstream extension vertices at x_far.
+        point3((cfg.x_far, 0.0), zf),          # 30
+        point3((cfg.x_far, cfg.y_max), zf),    # 31
+        point3((cfg.x_far, cfg.y_min), zf),    # 32
+        point3((cfg.x_far, 0.0), zb),          # 33
+        point3((cfg.x_far, cfg.y_max), zb),    # 34
+        point3((cfg.x_far, cfg.y_min), zb),    # 35
     ]
 
     lower_cap_mid = lower[cap_idx: mid_idx + 1]
@@ -425,6 +440,18 @@ blocks
     hex (2 17 9 21 6 19 13 23)
         ({cfg.n_wake_x} {cfg.n_streamwise_near} {cfg.n_z})
         simpleGrading ({cfg.grading_wake_x} {cfg.grading_to_wall} 1)
+
+    // upper far wake block (x_max -> x_far, y=0 -> y_max)
+    // j=0 face (17,10,14,19) shared with j=max face of upper wake block
+    hex (17 10 31 30  19 14 34 33)
+        ({cfg.n_streamwise_near} {cfg.n_far_wake_x} {cfg.n_z})
+        simpleGrading ({cfg.grading_to_wall} {cfg.grading_far_wake_x} 1)
+
+    // lower far wake block (x_max -> x_far, y=0 -> y_min)
+    // i=0 face (17,9,13,19) shared with i=max face of lower wake block
+    hex (17 30 32 9  19 33 35 13)
+        ({cfg.n_far_wake_x} {cfg.n_streamwise_near} {cfg.n_z})
+        simpleGrading ({cfg.grading_far_wake_x} {cfg.grading_to_wall} 1)
 );
 
 edges
@@ -464,8 +491,8 @@ boundary
         type patch;
         faces
         (
-            (10 17 19 14)
-            (17 9 13 19)
+            (33 34 31 30)
+            (35 33 30 32)
         );
     }}
 
@@ -489,6 +516,12 @@ boundary
             (5 12 23 6)
             (6 19 14 22)
             (6 23 13 19)
+
+            // far wake front/back
+            (30 31 10 17)
+            (17 9 32 30)
+            (19 14 34 33)
+            (19 33 35 13)
         );
     }}
 
@@ -515,6 +548,10 @@ boundary
 
             (11 20 22 15)
             (8 21 23 12)
+
+            // far wake top/bottom
+            (10 31 34 14)
+            (13 35 32 9)
         );
     }}
 );
