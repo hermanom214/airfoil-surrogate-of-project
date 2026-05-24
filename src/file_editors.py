@@ -1,17 +1,17 @@
+"""
+Utility funkce pro úpravu OpenFOAM case souborů po zkopírování template.
+
+Modul zajišťuje:
+- nastavení inlet/internal rychlosti v souboru 0/U,
+- nastavení referenční rychlosti magUInf v system/forceCoeffs.
+
+Používá se při build procesu case folderů ve blockMesh workflow.
+"""
+
 from __future__ import annotations
 
-import math
 import re
 from pathlib import Path
-
-
-def velocity_components(mag_u: float) -> tuple[float, float]:
-    """
-    Vrací rychlost pouze ve směru x.
-    AoA se nebude řešit natočením rychlosti, ale natočením geometrie.
-    """
-    return mag_u, 0.0
-
 
 def update_u_file(u_file: Path, inlet_velocity: float) -> None:
     """
@@ -27,8 +27,7 @@ def update_u_file(u_file: Path, inlet_velocity: float) -> None:
 
     text = u_file.read_text(encoding="utf-8")
 
-    ux, uy = velocity_components(inlet_velocity)
-    vec = f"({ux:.6f} {uy:.6f} 0)"
+    vec = f"({inlet_velocity:.6f} {0.0:.6f} 0)"
 
     text, count_internal = re.subn(
         r"internalField\s+uniform\s+\([^)]+\);",
@@ -57,7 +56,7 @@ def update_force_coeffs_file(force_file: Path, inlet_velocity: float) -> None:
     Upraví system/forceCoeffs:
     - magUInf
 
-    AoA řešíme natočením inlet velocity v 0/U,
+    AoA řešíme natočením geometrie,
     proto dragDir/liftDir necháváme fixní.
     """
     if not force_file.exists():

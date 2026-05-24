@@ -1,1 +1,27 @@
-{\rtf1}
+case_runner:
+  n_procs: 4
+  required_case_subdirs: ["0", "constant", "system"]
+  run_steps:
+    - status_key: "blockmesh_status"
+      command: ["blockMesh"]
+      log_name: "01_blockMesh.log"
+    - status_key: "checkmesh_status"
+      command: ["checkMesh"]
+      log_name: "02_checkMesh.log"
+    - status_key: null
+      command: ["decomposePar", "-force"]
+      log_name: "03_decomposePar.log"
+    - status_key: "simplefoam_status"
+      command: ["simpleFoam", "-parallel"]
+      log_name: "04_simpleFoam.log"
+    - status_key: null
+      command: ["reconstructPar", "-latestTime"]
+      log_name: "05_reconstructPar.log"
+
+foam_to_vtk:
+  command: ["foamToVTK", "-latestTime", "-ascii", "-fields", "'(p U)'"]
+  log_name: "06_foamToVTK.log"
+
+run_cases:
+  max_workers: 1
+  cases_subdir: "blockmesh_cases"

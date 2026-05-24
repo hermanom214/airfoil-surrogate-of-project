@@ -1,0 +1,33 @@
+model:
+  name: "simple_unet" # možnosti: "simple_unet" | "rans_pinn"
+  params:
+    simple_unet:
+      in_channels: 5 # obvykle 5; měň jen pokud změníš vstupní featury datasetu
+      out_channels: 3 # obvykle 3 (p, Ux, Uy)
+      encoder_channels: [32, 64, 128] # rozumně [16,32,64] až [64,128,256]
+      bottleneck_channels: 256 # typicky 2x až 4x poslední encoder channel
+    rans_pinn:
+      in_channels: 5 # obvykle 5
+      out_channels: 3 # obvykle 3
+      hidden_channels: 128 # rozumně 64–256 (víc = vyšší paměť/čas)
+      depth: 6 # rozumně 4–10 (vyšší = větší kapacita i riziko nestability)
+
+training:
+  batch_size: 2 # rozumně 1–16 dle GPU RAM
+  epochs: 50 # rozumně 20–300 dle konvergence
+  learning_rate: 0.001 # rozumně 1e-4 až 3e-3 (Adam)
+  validation_split: 0.2 # rozumně 0.1–0.3
+  split_seed: 42 # libovolné celé číslo pro reprodukovatelnost
+
+physics_loss:
+  nu: 1.5e-5 # kinematická viskozita [m^2/s], typicky 1e-6 až 1e-4 dle média
+  weight: 1.0e-8 # váha physics loss, rozumně 1e-10 až 1e-3
+  warmup_epochs: 30 # rozumně 0 až ~50 % celkových epoch
+  u_scale: 50.0 # škála rychlosti pro denormalizaci v residualu, typicky 10–100
+  p_scale: 1000.0 # škála tlaku pro denormalizaci v residualu, typicky 100–5000
+  pressure_is_kinematic: true # true pro kinematický tlak p/rho, false pro absolutní tlak
+  mask_erode_pixels: 1 # rozumně 0–3 (větší = menší vliv stěnových buněk)
+
+output:
+  models_subdir: "data/models" # relativní cesta od project root
+  filename_template: "{model_name}_airfoil.pt" # lze použít placeholder {model_name}

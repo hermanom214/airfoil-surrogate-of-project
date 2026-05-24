@@ -8,7 +8,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
 from src.case_builder import build_single_blockmesh_case  # noqa: E402
-from src.config import load_paths  # noqa: E402
+from src.config import load_dataset_build_config, load_paths  # noqa: E402
 from src.generate_sampling_table import generate_sampling_table  # noqa: E402
 from src.sampling import load_sampling_table  # noqa: E402
 
@@ -22,8 +22,10 @@ def main() -> None:
     """
     project_root = Path(__file__).resolve().parents[1]
     config_path = project_root / "configs" / "paths.yaml"
+    dataset_config_path = project_root / "configs" / "dataset_config.yaml"
 
     paths = load_paths(config_path)
+    dataset_cfg = load_dataset_build_config(dataset_config_path)
 
     # Ensure geometry folders exist even if they were not created beforehand.
     geometry_root = paths.generated_profiles.parent
@@ -32,16 +34,16 @@ def main() -> None:
 
     # Auto-generate sampling table if it does not exist yet.
     if not paths.sampling_table.exists():
-        n = generate_sampling_table(paths.sampling_table)
+        n = generate_sampling_table(paths.sampling_table, dataset_cfg.sampling)
         print(f"[INFO] Generated sampling table: {paths.sampling_table} ({n} rows)")
     else:
         print(f"[INFO] Using existing sampling table: {paths.sampling_table}")
 
     rows = load_sampling_table(paths.sampling_table)
 
-    template_case = project_root / "templates" / "openfoam_base_case_yPlus1"
-    blockmesh_run_root = paths.openfoam_run_root / "blockmesh_cases"
-    blockmesh_case_sim_root = paths.openfoam_case_sim / "blockmesh_cases"
+    template_case = project_root / dataset_cfg.template_case_relpath
+    blockmesh_run_root = paths.openfoam_run_root / dataset_cfg.blockmesh_cases_subdir
+    blockmesh_case_sim_root = paths.openfoam_case_sim / dataset_cfg.blockmesh_cases_subdir
 
     blockmesh_run_root.mkdir(parents=True, exist_ok=True)
 
@@ -59,6 +61,7 @@ def main() -> None:
             index=i,
             template_case=template_case,
             openfoam_run_root=blockmesh_run_root,
+            blockmesh_cfg=dataset_cfg.blockmesh,
         )
         built_cases.append(case_dir)
         print(f"Built blockMesh case: {case_dir.name}")

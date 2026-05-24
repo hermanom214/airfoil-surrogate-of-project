@@ -1,0 +1,36 @@
+template_case_relpath: "templates/openfoam_base_case_yPlus1"
+blockmesh_cases_subdir: "blockmesh_cases"
+
+sampling:
+  chord: 1.0
+  aoa_values: [-4.0, 0.0, 4.0]
+  inlet_velocity_values: [15.0, 20.0, 25.0]
+  camber_values: [0, 2, 4]
+  camber_position_values: [2, 4]
+  thickness_values: [8, 12, 16]
+
+blockmesh:
+  z_half: 0.05
+  x_min: -5.0
+  x_max: 12.0
+  x_far: 20.0
+  y_min: -5.0
+  y_max: 5.0
+  n_airfoil_half: 520
+  le_cluster_exp: 2.8
+  n_streamwise_near: 240
+  n_wall_normal: 170
+  n_wake_x: 320
+  n_z: 1
+  grading_to_wall: 2400.0
+  grading_le_tangent: 0.65
+  grading_wake_x: 1.35
+  n_far_wake_x: 80
+  grading_far_wake_x: 4.0
+  enable_le_cap: false
+  le_cap_fraction: 0.035
+  le_cap_power: 1.2
+  le_topology_fraction: 0.028
+  n_le_cap_normal: 42
+  te_transition_fraction: 0.995
+  wake_cut_length: 0.0001

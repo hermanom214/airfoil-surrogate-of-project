@@ -5,33 +5,46 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-# Global model switch. Keep this at the top for quick toggling.
-DEFAULT_MODEL_NAME = "simple_unet"
 AVAILABLE_MODELS = ("simple_unet", "rans_pinn")
 
 
 class SimpleUNet(nn.Module):
-    def __init__(self, in_channels: int = 5, out_channels: int = 3):
+    def __init__(
+        self,
+        in_channels: int = 5,
+        out_channels: int = 3,
+        encoder_channels: tuple[int, int, int] | list[int] = (32, 64, 128),
+        bottleneck_channels: int = 256,
+    ):
         super().__init__()
 
-        self.enc1 = self.block(in_channels, 32)
-        self.enc2 = self.block(32, 64)
-        self.enc3 = self.block(64, 128)
+        if len(encoder_channels) != 3:
+            raise ValueError("encoder_channels must contain exactly 3 values")
+
+        c1, c2, c3 = int(encoder_channels[0]), int(encoder_channels[1]), int(encoder_channels[2])
+        cb = int(bottleneck_channels)
+
+        if min(c1, c2, c3, cb) <= 0:
+            raise ValueError("All channel counts must be > 0")
+
+        self.enc1 = self.block(in_channels, c1)
+        self.enc2 = self.block(c1, c2)
+        self.enc3 = self.block(c2, c3)
 
         self.pool = nn.MaxPool2d(2)
 
-        self.bottleneck = self.block(128, 256)
+        self.bottleneck = self.block(c3, cb)
 
-        self.up3 = nn.ConvTranspose2d(256, 128, 2, stride=2)
-        self.dec3 = self.block(256, 128)
+        self.up3 = nn.ConvTranspose2d(cb, c3, 2, stride=2)
+        self.dec3 = self.block(c3 + c3, c3)
 
-        self.up2 = nn.ConvTranspose2d(128, 64, 2, stride=2)
-        self.dec2 = self.block(128, 64)
+        self.up2 = nn.ConvTranspose2d(c3, c2, 2, stride=2)
+        self.dec2 = self.block(c2 + c2, c2)
 
-        self.up1 = nn.ConvTranspose2d(64, 32, 2, stride=2)
-        self.dec1 = self.block(64, 32)
+        self.up1 = nn.ConvTranspose2d(c2, c1, 2, stride=2)
+        self.dec1 = self.block(c1 + c1, c1)
 
-        self.out = nn.Conv2d(32, out_channels, kernel_size=1)
+        self.out = nn.Conv2d(c1, out_channels, kernel_size=1)
 
     @staticmethod
     def block(in_ch: int, out_ch: int) -> nn.Sequential:
@@ -277,7 +290,7 @@ class PhysicsInformedCNN(nn.Module):
         }
 
 
-def build_model(model_name: str = DEFAULT_MODEL_NAME, **kwargs) -> nn.Module:
+def build_model(model_name: str, **kwargs) -> nn.Module:
     """Factory for selecting a model architecture from AVAILABLE_MODELS."""
 
     key = model_name.lower().strip()

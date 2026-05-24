@@ -1,17 +1,34 @@
+"""
+Flow-field extraction utilities for the blockMesh OpenFOAM workflow.
+
+Module responsibilities:
+- run `foamToVTK` for a solved case,
+- load pressure/velocity fields from VTK,
+- interpolate fields to a regular 2D grid,
+- build a fluid mask from NACA geometry,
+- export compressed `.npz` samples and dataset index CSV.
+"""
+
 from __future__ import annotations
 
 import csv
+import importlib
 import json
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
 import numpy as np
 from scipy.interpolate import griddata
+from shapely.geometry import Point, Polygon
 
 from src.case_runner import run_command, discover_case_dirs
-import pyvista as pv
+from src.config import load_solver_config
 
-from shapely.geometry import Point, Polygon
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SOLVER_CONFIG_PATH = PROJECT_ROOT / "configs" / "solver_config.yaml"
+SOLVER_CFG = load_solver_config(SOLVER_CONFIG_PATH)
+
 
 @dataclass
 class FlowExtractionResult:
@@ -24,10 +41,9 @@ class FlowExtractionResult:
     latest_time: str
 
 
-
-
-
-def read_vtk_with_pyvista(vtk_file: Path):
+def read_vtk_with_pyvista(vtk_file: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Read points, pressure and velocity from a VTK file using PyVista."""
+    pv = importlib.import_module("pyvista")
     mesh = pv.read(str(vtk_file))
 
     points = mesh.points  # (N, 3)
@@ -50,9 +66,11 @@ def read_vtk_with_pyvista(vtk_file: Path):
     else:
         raise RuntimeError(f"'U' not found in {vtk_file}")
 
-    return points, p, U
+    return np.asarray(points), np.asarray(p), np.asarray(U)
+
 
 def find_latest_time_dir(case_dir: Path) -> str:
+    """Return the latest numeric OpenFOAM time directory name in a case."""
     time_dirs = []
 
     for path in case_dir.iterdir():
@@ -73,23 +91,19 @@ def find_latest_time_dir(case_dir: Path) -> str:
 
 
 def run_foam_to_vtk(case_dir: Path) -> int:
+    """Run foamToVTK for latest time and return process return code."""
     result = run_command(
-        command=[
-            "foamToVTK",
-            "-latestTime",
-            "-ascii",
-            "-fields",
-            "'(p U)'",
-        ],
+        command=SOLVER_CFG.foam_to_vtk.command,
         case_dir=case_dir,
         log_dir=case_dir / "logs",
-        log_name="06_foamToVTK.log",
+        log_name=SOLVER_CFG.foam_to_vtk.log_name,
     )
 
     return result.returncode
 
 
 def find_vtk_file(case_dir: Path) -> Path:
+    """Find the newest top-level VTK file in case_dir/VTK."""
     vtk_root = case_dir / "VTK"
 
     if not vtk_root.exists():
@@ -101,110 +115,6 @@ def find_vtk_file(case_dir: Path) -> Path:
         raise RuntimeError(f"No main VTK files found in {vtk_root}")
 
     return vtk_files[-1]
-
-
-def _read_numbers(lines: list[str], start_idx: int, count: int, dtype=float):
-    values = []
-    i = start_idx
-
-    while len(values) < count and i < len(lines):
-        parts = lines[i].strip().split()
-        for part in parts:
-            values.append(dtype(part))
-            if len(values) == count:
-                break
-        i += 1
-
-    return values, i
-
-
-def read_openfoam_vtk(vtk_file: Path):
-    lines = vtk_file.read_text(encoding="utf-8", errors="ignore").splitlines()
-
-    points = []
-    p = []
-    U = []
-
-    mode = None
-    reading_points = False
-    reading_p = False
-    reading_U = False
-
-    for line in lines:
-        stripped = line.strip()
-
-        if stripped.startswith("POINTS"):
-            reading_points = True
-            mode = None
-            continue
-
-        if stripped.startswith("CELLS") or stripped.startswith("CELL_TYPES"):
-            reading_points = False
-            continue
-
-        if stripped.startswith("POINT_DATA"):
-            mode = "POINT_DATA"
-            reading_points = False
-            reading_p = False
-            reading_U = False
-            continue
-
-        if stripped.startswith("CELL_DATA"):
-            mode = "CELL_DATA"
-            reading_p = False
-            reading_U = False
-            continue
-
-        if mode != "POINT_DATA":
-            if reading_points:
-                vals = stripped.split()
-                if len(vals) == 3:
-                    points.append([float(v) for v in vals])
-            continue
-
-        if stripped.startswith("SCALARS p"):
-            reading_p = True
-            reading_U = False
-            continue
-
-        if stripped.startswith("LOOKUP_TABLE"):
-            continue
-
-        if stripped.startswith("VECTORS U"):
-            reading_p = False
-            reading_U = True
-            continue
-
-        if reading_p:
-            vals = stripped.split()
-            for v in vals:
-                p.append(float(v))
-
-        elif reading_U:
-            vals = stripped.split()
-            if len(vals) == 3:
-                U.append([float(v) for v in vals])
-
-    points = np.array(points, dtype=float)
-    p = np.array(p, dtype=float)
-    U = np.array(U, dtype=float)
-
-    if len(points) == 0:
-        raise RuntimeError(f"No POINTS found in {vtk_file}")
-
-    if len(p) == 0:
-        raise RuntimeError(f"No POINT_DATA pressure p found in {vtk_file}")
-
-    if len(U) == 0:
-        raise RuntimeError(f"No POINT_DATA velocity U found in {vtk_file}")
-
-    if len(points) != len(p) or len(points) != len(U):
-        raise RuntimeError(
-            f"POINT_DATA size mismatch in {vtk_file}: "
-            f"points={len(points)}, p={len(p)}, U={len(U)}"
-        )
-
-    return points, p, U
 
 
 def interpolate_to_grid(
@@ -327,6 +237,7 @@ def extract_single_case(
 
 
 def write_flow_index(results: list[FlowExtractionResult], output_csv: Path) -> None:
+    """Write extraction summary CSV."""
     output_csv.parent.mkdir(parents=True, exist_ok=True)
 
     fieldnames = [
@@ -347,6 +258,7 @@ def write_flow_index(results: list[FlowExtractionResult], output_csv: Path) -> N
 
         if rows:
             writer.writerows(rows)
+
 
 def generate_naca4_polygon(
     naca_code: str,
@@ -403,6 +315,7 @@ def create_fluid_mask(
     naca_code: str,
     chord: float = 1.0,
 ) -> np.ndarray:
+    """Return 1.0 in fluid cells and 0.0 inside the airfoil polygon."""
     polygon = generate_naca4_polygon(
         naca_code=naca_code,
         chord=chord,

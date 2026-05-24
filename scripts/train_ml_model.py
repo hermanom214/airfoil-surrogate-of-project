@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -17,27 +18,23 @@ from torch.utils.data import DataLoader, random_split
 # Allow imports from the project root (src/ package)
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from src.config import load_paths
+from src.config import load_ml_models_config, load_paths
 from src.ml_dataset import AirfoilFlowDataset
-from src.ml_models import DEFAULT_MODEL_NAME, build_model
+from src.ml_models import build_model
 from src.ml_training import evaluate, masked_mse
 from src.ml_validation import plot_loss_curves
 
 
 # --- Configuration -----------------------------------------------------------
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "paths.yaml"
+ML_CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "ml_models_config.yaml"
 PATHS = load_paths(CONFIG_PATH)  # Load project paths from YAML config
+ML_CFG = load_ml_models_config(ML_CONFIG_PATH)
 
 DATA_DIR = PATHS.flow_fields_output           # Directory with .npz flow-field files
-OUTPUT_PATH = PATHS.project_root / "data" / "models" / f"{DEFAULT_MODEL_NAME}_airfoil.pt"  # Where to save trained weights
-
-# Hyper-parameters
-BATCH_SIZE = 2
-EPOCHS = 50
-LR = 1e-3
-PHYSICS_LOSS_WEIGHT = 1e-8
-PHYSICS_WARMUP_EPOCHS = 30
-NU = 1.5e-5
+MODEL_NAME = ML_CFG.model.name
+MODEL_OUTPUT_FILENAME = ML_CFG.output.filename_template.format(model_name=MODEL_NAME)
+OUTPUT_PATH = PATHS.project_root / ML_CFG.output.models_subdir / MODEL_OUTPUT_FILENAME
 
 
 class PhysicsLossModel(Protocol):
@@ -97,6 +94,10 @@ def train_one_epoch_physics(
     dy: float,
     nu: float,
     physics_weight: float,
+    u_scale: float,
+    p_scale: float,
+    pressure_is_kinematic: bool,
+    mask_erode_pixels: int,
 ) -> dict[str, float]:
     if not hasattr(model, "rans_residual_loss"):
         raise TypeError("Selected model does not implement rans_residual_loss")
@@ -127,9 +128,10 @@ def train_one_epoch_physics(
             dx=dx,
             dy=dy,
             nu=nu,
-            u_scale=50.0,
-            p_scale=1000.0,
-            pressure_is_kinematic=True,
+            u_scale=u_scale,
+            p_scale=p_scale,
+            pressure_is_kinematic=pressure_is_kinematic,
+            mask_erode_pixels=mask_erode_pixels,
         )
         loss_total = loss_data + physics_weight * phys["physics_loss"]
 
@@ -166,7 +168,7 @@ def main() -> None:
     print(f"[INFO] Grid spacing | dx: {dx:.6e} | dy: {dy:.6e}")
 
     # Split dataset 80/20 into training and validation subsets
-    train_size = max(1, int(0.8 * len(dataset)))
+    train_size = max(1, int((1.0 - ML_CFG.training.validation_split) * len(dataset)))
     val_size = len(dataset) - train_size
 
     if val_size == 0:
@@ -174,7 +176,7 @@ def main() -> None:
         train_set = dataset
         val_set = dataset
     else:
-        generator = torch.Generator().manual_seed(42)  # Fixed seed for reproducible splits
+        generator = torch.Generator().manual_seed(ML_CFG.training.split_seed)
         train_set, val_set = random_split(dataset, [train_size, val_size], generator=generator)
 
     # Fit condition normalisation from training samples only
@@ -197,24 +199,31 @@ def main() -> None:
     )
 
     # Create data loaders for batched iteration
-    train_loader = DataLoader(train_set, batch_size=BATCH_SIZE, shuffle=True)
-    val_loader = DataLoader(val_set, batch_size=BATCH_SIZE, shuffle=False)
+    train_loader = DataLoader(train_set, batch_size=ML_CFG.training.batch_size, shuffle=True)
+    val_loader = DataLoader(val_set, batch_size=ML_CFG.training.batch_size, shuffle=False)
 
     # Initialise selected model and Adam optimiser
-    model = build_model(DEFAULT_MODEL_NAME).to(device)
-    print(f"[INFO] Model: {DEFAULT_MODEL_NAME}")
-    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+    if MODEL_NAME == "simple_unet":
+        model_kwargs = asdict(ML_CFG.model.params.simple_unet)
+    elif MODEL_NAME == "rans_pinn":
+        model_kwargs = asdict(ML_CFG.model.params.rans_pinn)
+    else:
+        raise ValueError(f"Unsupported model in config: {MODEL_NAME}")
+
+    model = build_model(MODEL_NAME, **model_kwargs).to(device)
+    print(f"[INFO] Model: {MODEL_NAME}")
+    optimizer = torch.optim.Adam(model.parameters(), lr=ML_CFG.training.learning_rate)
 
     # Accumulators for loss history (used for the final plot)
     train_history: list[float] = []
     val_history: list[float] = []
 
     # --- Training loop -------------------------------------------------------
-    for epoch in range(1, EPOCHS + 1):
-        if epoch < PHYSICS_WARMUP_EPOCHS:
+    for epoch in range(1, ML_CFG.training.epochs + 1):
+        if epoch < ML_CFG.physics_loss.warmup_epochs:
             physics_weight = 0.0
         else:
-            physics_weight = PHYSICS_LOSS_WEIGHT
+            physics_weight = ML_CFG.physics_loss.weight
 
         train_metrics = train_one_epoch_physics(
             model=model,
@@ -223,8 +232,12 @@ def main() -> None:
             device=device,
             dx=dx,
             dy=dy,
-            nu=NU,
+            nu=ML_CFG.physics_loss.nu,
             physics_weight=physics_weight,
+            u_scale=ML_CFG.physics_loss.u_scale,
+            p_scale=ML_CFG.physics_loss.p_scale,
+            pressure_is_kinematic=ML_CFG.physics_loss.pressure_is_kinematic,
+            mask_erode_pixels=ML_CFG.physics_loss.mask_erode_pixels,
         )
         val_loss = evaluate(model, val_loader, device)                        # Evaluate on validation set
 

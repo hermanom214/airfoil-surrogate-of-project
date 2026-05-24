@@ -7,13 +7,17 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Iterable
 
-from src.config import load_paths
+from src.config import load_paths, load_solver_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CONFIG_PATH = PROJECT_ROOT / "configs" / "paths.yaml"
-PATHS = load_paths(CONFIG_PATH)
+PATHS_CONFIG_PATH = PROJECT_ROOT / "configs" / "paths.yaml"
+SOLVER_CONFIG_PATH = PROJECT_ROOT / "configs" / "solver_config.yaml"
+PATHS = load_paths(PATHS_CONFIG_PATH)
+SOLVER_CFG = load_solver_config(SOLVER_CONFIG_PATH)
 OF_BASH = str(PATHS.openfoam_bash)
-N_PROCS = 4
+N_PROCS = SOLVER_CFG.case_runner.n_procs
+REQUIRED_CASE_SUBDIRS = tuple(SOLVER_CFG.case_runner.required_case_subdirs)
+
 
 def to_cygwin_path(path: Path) -> str:
     """
@@ -105,20 +109,16 @@ def discover_case_dirs(cases_root: Path) -> list[Path]:
     """
     Finds case directories. A valid case contains 0, constant, and system folders.
     """
-    case_dirs: list[Path] = []
-
     if not cases_root.exists():
-        return case_dirs
+        return []
+
+    case_dirs: list[Path] = []
 
     for path in sorted(cases_root.iterdir()):
         if not path.is_dir():
             continue
 
-        has_required = (
-            (path / "0").is_dir()
-            and (path / "constant").is_dir()
-            and (path / "system").is_dir()
-        )
+        has_required = all((path / name).is_dir() for name in REQUIRED_CASE_SUBDIRS)
 
         if has_required:
             case_dirs.append(path)
@@ -136,34 +136,26 @@ def run_single_case(case_dir: Path) -> CaseRunResult:
 
     overall_start = time.perf_counter()
 
-    steps = [
-        ("blockmesh_status", ["blockMesh"], "01_blockMesh.log"),
-        ("checkmesh_status", ["checkMesh"], "02_checkMesh.log"),
-        ("decompose_status", ["decomposePar", "-force"], "03_decomposePar.log"),
-        ("simplefoam_status", ["simpleFoam", "-parallel"], "04_simpleFoam.log"),
-        ("reconstruct_status", ["reconstructPar", "-latestTime"], "05_reconstructPar.log"),
-    ]
- 
     statuses = {
         "blockmesh_status": "not_run",
         "checkmesh_status": "not_run",
-        "decompose_status": "not_run",
         "simplefoam_status": "not_run",
-        "reconstruct_status": "not_run",
     }
 
-    for status_key, command, log_name in steps:
+    for step in SOLVER_CFG.case_runner.run_steps:
         result = run_command(
-            command=command,
+            command=step.command,
             case_dir=case_dir,
             log_dir=log_dir,
-            log_name=log_name,
+            log_name=step.log_name,
         )
 
         if result.ok:
-            statuses[status_key] = "ok"
+            if step.status_key is not None:
+                statuses[step.status_key] = "ok"
         else:
-            statuses[status_key] = f"failed({result.returncode})"
+            if step.status_key is not None:
+                statuses[step.status_key] = f"failed({result.returncode})"
             runtime_sec = time.perf_counter() - overall_start
 
             return CaseRunResult(

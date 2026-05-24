@@ -1,24 +1,17 @@
 """
-Generates the airfoil sampling table (CSV) used by build_blockmesh_cases.
+Generování sampling tabulky pro blockMesh workflow.
 
-Defines the NACA 4-digit parameter sweep and expands it with all CFD conditions
-(angle of attack, inlet velocity). No STL or DAT geometry files are produced here.
+Modul vytváří kombinace NACA 4-digit profilů a provozních podmínek
+(AoA, inlet velocity) a ukládá je do CSV. Negeneruje žádnou geometrii
+(DAT/STL) – pouze tabulku parametrů pro build krok.
 """
 from __future__ import annotations
 
 import csv
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import List
 
-
-# ============================================================
-# CFD SWEEP CONFIGURATION
-# ============================================================
-
-AOA_VALUES: list[float] = [-4.0, 0.0, 4.0]
-INLET_VELOCITY_VALUES: list[float] = [15.0, 20.0, 25.0]
-CHORD: float = 1.0
+from src.config import SamplingConfig
 
 
 # ============================================================
@@ -42,13 +35,14 @@ class AirfoilCase:
 # CASE LISTS
 # ============================================================
 
-def get_base_cases() -> List[AirfoilCase]:
-    """Returns the list of unique NACA profiles to simulate."""
-    base_cases: List[AirfoilCase] = []
+def get_base_cases(cfg: SamplingConfig) -> list[AirfoilCase]:
+    """Return unique NACA profiles used in the sweep."""
+    base_cases: list[AirfoilCase] = []
+    seen_codes: set[str] = set()
 
-    camber_values = [0, 2, 4]
-    camber_pos_values = [2, 4]
-    thickness_values = [8, 12, 16]
+    camber_values = cfg.camber_values
+    camber_pos_values = cfg.camber_position_values
+    thickness_values = cfg.thickness_values
 
     for camber in camber_values:
         for camber_pos in camber_pos_values:
@@ -58,27 +52,34 @@ def get_base_cases() -> List[AirfoilCase]:
                         camber_percent=0,
                         camber_position_tenths=0,
                         thickness_percent=thickness,
+                        chord=cfg.chord,
                     )
                 else:
                     case = AirfoilCase(
                         camber_percent=camber,
                         camber_position_tenths=camber_pos,
                         thickness_percent=thickness,
+                        chord=cfg.chord,
                     )
 
-                if not any(existing.naca_code() == case.naca_code() for existing in base_cases):
+                code = case.naca_code()
+                if code not in seen_codes:
+                    seen_codes.add(code)
                     base_cases.append(case)
 
     return base_cases
 
 
-def expand_cases_with_conditions(base_cases: List[AirfoilCase]) -> List[AirfoilCase]:
-    """Expands each base profile with all AoA × inlet velocity combinations."""
-    expanded: List[AirfoilCase] = []
+def expand_cases_with_conditions(
+    base_cases: list[AirfoilCase],
+    cfg: SamplingConfig,
+) -> list[AirfoilCase]:
+    """Expand each base profile with all AoA × inlet velocity combinations."""
+    expanded: list[AirfoilCase] = []
 
     for case in base_cases:
-        for aoa in AOA_VALUES:
-            for inlet_velocity in INLET_VELOCITY_VALUES:
+        for aoa in cfg.aoa_values:
+            for inlet_velocity in cfg.inlet_velocity_values:
                 expanded.append(
                     AirfoilCase(
                         camber_percent=case.camber_percent,
@@ -97,8 +98,8 @@ def expand_cases_with_conditions(base_cases: List[AirfoilCase]) -> List[AirfoilC
 # CSV WRITE
 # ============================================================
 
-def write_sampling_table(csv_path: Path, cases: List[AirfoilCase]) -> None:
-    """Writes the full case list to a CSV file."""
+def write_sampling_table(csv_path: Path, cases: list[AirfoilCase]) -> None:
+    """Write the full case list to CSV."""
     fieldnames = [
         "naca_code",
         "camber_percent",
@@ -125,12 +126,12 @@ def write_sampling_table(csv_path: Path, cases: List[AirfoilCase]) -> None:
 # PUBLIC API
 # ============================================================
 
-def generate_sampling_table(csv_path: Path) -> int:
+def generate_sampling_table(csv_path: Path, cfg: SamplingConfig) -> int:
     """
     Generates the sampling table CSV at *csv_path*.
 
     Returns the number of rows written.
     """
-    cases = expand_cases_with_conditions(get_base_cases())
+    cases = expand_cases_with_conditions(get_base_cases(cfg), cfg)
     write_sampling_table(csv_path, cases)
     return len(cases)

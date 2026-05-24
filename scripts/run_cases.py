@@ -12,22 +12,21 @@ import sys
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
-from src.config import load_paths
+from src.config import load_paths, load_solver_config
 from src.case_runner import (
     discover_case_dirs,
     run_single_case,
     write_run_status_csv,
 )
 
-
-MAX_WORKERS = 1  # začni opatrně: 2. Později zkus 3 nebo 4.
-
-
 def main() -> None:
     config_path = PROJECT_ROOT / "configs" / "paths.yaml"
+    solver_config_path = PROJECT_ROOT / "configs" / "solver_config.yaml"
     paths = load_paths(config_path)
+    solver_cfg = load_solver_config(solver_config_path)
 
-    cases_root = paths.openfoam_case_sim / "blockmesh_cases"
+    max_workers = solver_cfg.run_cases.max_workers
+    cases_root = paths.openfoam_case_sim / solver_cfg.run_cases.cases_subdir
     output_csv = cases_root / "run_status.csv"
 
     case_dirs = discover_case_dirs(cases_root)
@@ -38,11 +37,11 @@ def main() -> None:
         return
 
     print(f"[INFO] Nalezeno {len(case_dirs)} case(s).")
-    print(f"[INFO] Running with MAX_WORKERS={MAX_WORKERS}")
+    print(f"[INFO] Running with MAX_WORKERS={max_workers}")
 
     results = []
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_case = {
             executor.submit(run_single_case, case_dir): case_dir
             for case_dir in case_dirs

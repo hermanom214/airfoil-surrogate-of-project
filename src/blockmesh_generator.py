@@ -30,7 +30,6 @@ class CGridBlockMeshConfig:
     n_airfoil_half: int = 80
     le_cluster_exp: float = 2.5
 
-    n_streamwise_le: int = 60  # Fine refinement in LE cluster block
     n_streamwise_near: int = 100
     n_wall_normal: int = 80
     n_wake_x: int = 120
@@ -38,7 +37,6 @@ class CGridBlockMeshConfig:
     n_z: int = 1
 
     grading_to_wall: float = 800.0
-    grading_from_wall: float = 0.00125
     grading_le_tangent: float = 0.45
     grading_wake_x: float = 8.0
 
@@ -49,8 +47,7 @@ class CGridBlockMeshConfig:
     n_far_wake_x: int = 80
     grading_far_wake_x: float = 4.0
 
-    # Small artificial wake cut behind TE for block topology.
-    # Keep small for first tests.
+    # Small artificial wake cut behind TE for the C-grid block topology.
     wake_cut_length: float = 0.03
 
     # Geometric leading-edge cap smoothing (keeps topology unchanged).
@@ -234,6 +231,20 @@ def rotate_points(points: List[Point2D], angle_deg: float) -> List[Point2D]:
     return [rotate_point(p, angle_deg) for p in points]
 
 
+def find_first_x_aligned_index(
+    upper: List[Point2D],
+    lower: List[Point2D],
+    x_target: float,
+    start_idx: int,
+    stop_idx: int,
+    default_idx: int,
+) -> int:
+    for i in range(start_idx, stop_idx):
+        if upper[i][0] >= x_target and lower[i][0] >= x_target:
+            return i
+    return default_idx
+
+
 def fmt_point3(p: Point3D) -> str:
     return f"({p[0]:.8f} {p[1]:.8f} {p[2]:.8f})"
 
@@ -242,20 +253,16 @@ def point3(p: Point2D, z: float) -> Point3D:
     return p[0], p[1], z
 
 
-def fmt_curve(
+def fmt_spline(
     start: int,
     end: int,
     points: List[Point2D],
     z: float,
-    curve_type: str = "spline",
 ) -> str:
-    out = [f"    {curve_type} {start} {end}", "    ("]
+    out = [f"    spline {start} {end}", "    ("]
 
-    # For spline, OpenFOAM expects interpolation points between start/end vertices.
-    if curve_type == "spline" and len(points) >= 2:
-        pts = points[1:-1]
-    else:
-        pts = points
+    # OpenFOAM expects interpolation points between the start/end vertices.
+    pts = points[1:-1] if len(points) >= 2 else points
 
     for x, y in pts:
         out.append(f"        ({x:.8f} {y:.8f} {z:.8f})")
@@ -268,6 +275,9 @@ def build_cgrid_blockmesh_dict(
     aoa_deg: float,
     cfg: CGridBlockMeshConfig,
 ) -> str:
+    if cfg.x_far <= cfg.x_max:
+        raise ValueError("x_far must be greater than x_max")
+
     upper, lower = generate_naca4_upper_lower(
         params=naca,
         n_points=cfg.n_airfoil_half,
@@ -282,8 +292,7 @@ def build_cgrid_blockmesh_dict(
             cap_power=cfg.le_cap_power,
         )
 
-    # Same convention as rotated STL after correction:
-    # positive AoA -> nose up.
+    # Positive AoA means nose-up airfoil orientation.
     upper = rotate_points(upper, -aoa_deg)
     lower = rotate_points(lower, -aoa_deg)
 
@@ -292,20 +301,26 @@ def build_cgrid_blockmesh_dict(
     n_pts = min(len(upper), len(lower))
 
     x_te_transition = naca.chord * max(0.55, min(cfg.te_transition_fraction, 0.98))
-    mid_idx = n_pts // 2
-    for i in range(2, n_pts - 2):
-        if upper[i][0] >= x_te_transition and lower[i][0] >= x_te_transition:
-            mid_idx = i
-            break
+    mid_idx = find_first_x_aligned_index(
+        upper=upper,
+        lower=lower,
+        x_target=x_te_transition,
+        start_idx=2,
+        stop_idx=n_pts - 2,
+        default_idx=n_pts // 2,
+    )
 
     # Choose cap extent by physical x-location, not only by point index.
     # This keeps the topological cap very small even with heavy LE clustering.
     x_cap_target = naca.chord * max(0.004, min(cfg.le_topology_fraction, 0.06))
-    cap_idx = 2
-    for i in range(2, mid_idx - 1):
-        if upper[i][0] >= x_cap_target and lower[i][0] >= x_cap_target:
-            cap_idx = i
-            break
+    cap_idx = find_first_x_aligned_index(
+        upper=upper,
+        lower=lower,
+        x_target=x_cap_target,
+        start_idx=2,
+        stop_idx=mid_idx - 1,
+        default_idx=2,
+    )
 
     lower_cap = lower[cap_idx]
     upper_cap = upper[cap_idx]
@@ -313,15 +328,14 @@ def build_cgrid_blockmesh_dict(
     lower_mid = lower[mid_idx]
     upper_mid = upper[mid_idx]
 
-    # Small wake-cut point behind TE.
-    # This follows the topology idea from the reference blockMesh.
+    # Small wake-cut point behind TE used to close the C-grid topology.
     te_cut = (te[0] + cfg.wake_cut_length, te[1])
 
     zf = cfg.z_half
     zb = -cfg.z_half
 
-    # Keep upstream split on inlet plane to avoid skewed/triangular inlet patch.
-    x_mid = cfg.x_min
+    # Inlet-side split plane used by the upstream blocks.
+    x_inlet = cfg.x_min
     x_te = te[0]
 
     # Topological LE cap indexing:
@@ -339,15 +353,15 @@ def build_cgrid_blockmesh_dict(
         point3(te_cut, zb),             # 6
         point3(upper_mid, zb),          # 7
 
-        point3((x_mid, cfg.y_min), zf), # 8
+        point3((x_inlet, cfg.y_min), zf), # 8
         point3((cfg.x_max, cfg.y_min), zf), # 9
         point3((cfg.x_max, cfg.y_max), zf), # 10
-        point3((x_mid, cfg.y_max), zf), # 11
+        point3((x_inlet, cfg.y_max), zf), # 11
 
-        point3((x_mid, cfg.y_min), zb), # 12
+        point3((x_inlet, cfg.y_min), zb), # 12
         point3((cfg.x_max, cfg.y_min), zb), # 13
         point3((cfg.x_max, cfg.y_max), zb), # 14
-        point3((x_mid, cfg.y_max), zb), # 15
+        point3((x_inlet, cfg.y_max), zb), # 15
 
         point3((cfg.x_min, 0.0), zf),   # 16
         point3((cfg.x_max, 0.0), zf),   # 17
@@ -363,10 +377,10 @@ def build_cgrid_blockmesh_dict(
         point3(upper_cap, zf),          # 24
         point3(upper_cap, zb),          # 25
 
-        point3((x_mid, lower_cap[1]), zf),  # 26
-        point3((x_mid, upper_cap[1]), zf),  # 27
-        point3((x_mid, lower_cap[1]), zb),  # 28
-        point3((x_mid, upper_cap[1]), zb),  # 29
+        point3((x_inlet, lower_cap[1]), zf),  # 26
+        point3((x_inlet, upper_cap[1]), zf),  # 27
+        point3((x_inlet, lower_cap[1]), zb),  # 28
+        point3((x_inlet, upper_cap[1]), zb),  # 29
 
         # Far downstream extension vertices at x_far.
         point3((cfg.x_far, 0.0), zf),          # 30
@@ -458,17 +472,23 @@ edges
 (
 """
 
-    text += fmt_curve(0, 1, lower_cap_mid, zf, curve_type="spline") + "\n\n"
-    text += fmt_curve(1, 2, lower_mid_te, zf, curve_type="spline") + "\n\n"
-    text += fmt_curve(24, 3, upper_cap_mid, zf, curve_type="spline") + "\n\n"
-    text += fmt_curve(3, 2, upper_mid_te, zf, curve_type="spline") + "\n\n"
-    text += fmt_curve(0, 24, le_nose_curve, zf, curve_type="spline") + "\n\n"
-
-    text += fmt_curve(4, 5, lower_cap_mid, zb, curve_type="spline") + "\n\n"
-    text += fmt_curve(5, 6, lower_mid_te, zb, curve_type="spline") + "\n\n"
-    text += fmt_curve(25, 7, upper_cap_mid, zb, curve_type="spline") + "\n\n"
-    text += fmt_curve(7, 6, upper_mid_te, zb, curve_type="spline") + "\n"
-    text += fmt_curve(4, 25, le_nose_curve, zb, curve_type="spline") + "\n"
+    edge_specs = [
+        (0, 1, lower_cap_mid, zf),
+        (1, 2, lower_mid_te, zf),
+        (24, 3, upper_cap_mid, zf),
+        (3, 2, upper_mid_te, zf),
+        (0, 24, le_nose_curve, zf),
+        (4, 5, lower_cap_mid, zb),
+        (5, 6, lower_mid_te, zb),
+        (25, 7, upper_cap_mid, zb),
+        (7, 6, upper_mid_te, zb),
+        (4, 25, le_nose_curve, zb),
+    ]
+    text += "\n\n".join(
+        fmt_spline(start, end, points, z)
+        for start, end, points, z in edge_specs
+    )
+    text += "\n"
 
     text += f""");
 
