@@ -24,13 +24,13 @@ endTime         1000;
 deltaT          1;
 
 writeControl    timeStep;
-writeInterval   500;
+writeInterval   1000;
 
-purgeWrite      3;
+purgeWrite      1;
 
-writeFormat     ascii;
+writeFormat     binary;
 writePrecision  8;
-writeCompression off;
+writeCompression on;
 
 timeFormat      general;
 timePrecision   6;

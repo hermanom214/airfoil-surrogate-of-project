@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass, asdict
@@ -126,6 +127,26 @@ def discover_case_dirs(cases_root: Path) -> list[Path]:
     return case_dirs
 
 
+def cleanup_processor_dirs(case_dir: Path) -> int:
+    """
+    Remove OpenFOAM parallel decomposition folders like processor0, processor1, ...
+    after a case run to save disk space.
+    """
+    removed = 0
+
+    for path in case_dir.glob("processor*"):
+        if not path.is_dir():
+            continue
+
+        try:
+            shutil.rmtree(path)
+            removed += 1
+        except OSError as e:
+            print(f"[WARN] {case_dir.name}: nepodařilo se smazat {path.name} ({e})")
+
+    return removed
+
+
 def run_single_case(case_dir: Path) -> CaseRunResult:
     """
     Runs the full CFD chain for one case.
@@ -158,6 +179,10 @@ def run_single_case(case_dir: Path) -> CaseRunResult:
                 statuses[step.status_key] = f"failed({result.returncode})"
             runtime_sec = time.perf_counter() - overall_start
 
+            removed_count = cleanup_processor_dirs(case_dir)
+            if removed_count:
+                print(f"[CLEANUP] {case_id}: odstraněno {removed_count}x processor* složka")
+
             return CaseRunResult(
                 case_id=case_id,
                 case_path=str(case_dir),
@@ -169,6 +194,10 @@ def run_single_case(case_dir: Path) -> CaseRunResult:
             )
 
     runtime_sec = time.perf_counter() - overall_start
+
+    removed_count = cleanup_processor_dirs(case_dir)
+    if removed_count:
+        print(f"[CLEANUP] {case_id}: odstraněno {removed_count}x processor* složka")
 
     return CaseRunResult(
         case_id=case_id,

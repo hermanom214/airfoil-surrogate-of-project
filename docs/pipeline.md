@@ -1,17 +1,15 @@
 # Airfoil Surrogate Pipeline
 
-## Přehled
+## Overview
 
-Aktuální pipeline je postavená na **blockMesh-only** workflow:
-- generování sampling tabulky,
-- build case složek se syntetickým `blockMeshDict`,
-- OpenFOAM běh,
-- extrakce polí do NPZ,
-- ML trénink.
+The active project flow is a blockMesh-only workflow:
+- sampling table generation,
+- OpenFOAM case build with generated `blockMeshDict`,
+- CFD run,
+- flow-field extraction to NPZ,
+- ML training.
 
-Historická STL/snappy větev už není aktivní.
-
----
+The legacy STL/snappyHexMesh branch is not part of the current pipeline.
 
 ## End-to-end flow
 
@@ -31,66 +29,73 @@ flowchart LR
     J["configs/ml_models_config.yaml"] --> H
 ```
 
----
+## Main scripts
 
-## Hlavní skripty
-
-### 1) Build case složek
+### 1) Build case folders
 
 - script: [scripts/build_blockmesh_cases.py](../scripts/build_blockmesh_cases.py)
-- používá:
+- uses:
   - [configs/paths.yaml](../configs/paths.yaml)
   - [configs/dataset_config.yaml](../configs/dataset_config.yaml)
 
-Co dělá:
-- zajistí složky pro geometrii/sampling,
-- pokud chybí sampling CSV, vygeneruje ho přes [src/generate_sampling_table.py](../src/generate_sampling_table.py),
-- postaví `blockmesh_cases` ze šablony,
-- zapíše `params.json` a zrcadlí case do OpenFOAM run lokace.
+What it does:
+- ensures geometry/sampling folders exist,
+- auto-generates the sampling CSV via [src/generate_sampling_table.py](../src/generate_sampling_table.py) if missing,
+- builds `blockmesh_cases` from the selected template,
+- writes `params.json` for each case,
+- mirrors built cases to the OpenFOAM simulation location.
 
-### 2) CFD běh
+### 2) Run CFD
 
 - script: [scripts/run_cases.py](../scripts/run_cases.py)
 - runner: [src/case_runner.py](../src/case_runner.py)
-- konfigurace: [configs/solver_config.yaml](../configs/solver_config.yaml)
+- config: [configs/solver_config.yaml](../configs/solver_config.yaml)
 
-Řetěz kroků je plně konfigurovatelný (aktuálně `blockMesh -> checkMesh -> decomposePar -> simpleFoam -parallel -> reconstructPar`).
+The run-step chain is config-driven (currently:
+`blockMesh -> checkMesh -> decomposePar -> simpleFoam -parallel -> reconstructPar -latestTime`).
 
-### 3) Extrakce polí
+Current runner behavior:
+- writes per-step logs under each case `logs/` folder,
+- stores global status summary (`run_status.csv`),
+- removes `processor*` folders after each case finishes to reduce disk usage.
+
+### 3) Extract flow fields
 
 - script: [scripts/extract_flow_fields.py](../scripts/extract_flow_fields.py)
-- modul: [src/flow_extractor.py](../src/flow_extractor.py)
+- module: [src/flow_extractor.py](../src/flow_extractor.py)
 
-Co dělá:
-- spustí `foamToVTK` (command je v [configs/solver_config.yaml](../configs/solver_config.yaml)),
-- načte `p` a `U` z VTK,
-- interpoluje na pravidelnou mřížku,
-- vytvoří `fluid_mask`,
-- uloží `.npz` a index CSV.
+What it does:
+- runs `foamToVTK` (command from [configs/solver_config.yaml](../configs/solver_config.yaml)),
+- reads `p` and `U` from VTK,
+- interpolates to a regular grid,
+- creates `fluid_mask`,
+- exports `.npz` files and dataset index CSV.
 
-### 4) ML trénink
+Current extraction grid in the script:
+- `nx=640`, `ny=320`
+- `x in [-0.75, 1.75]`
+- `y in [-0.75, 0.75]`
+
+### 4) Train ML model
 
 - script: [scripts/train_ml_model.py](../scripts/train_ml_model.py)
-- modely: [src/ml_models.py](../src/ml_models.py)
+- models: [src/ml_models.py](../src/ml_models.py)
 - config: [configs/ml_models_config.yaml](../configs/ml_models_config.yaml)
 
-Všechny hlavní ML parametry jsou v YAML (model, architektura, hyperparametry, physics loss, output).
+The training script is config-driven for model selection, model parameters,
+optimizer settings, training split, physics-loss settings, and output naming.
 
----
+## Shared modules
 
-## Sdílené moduly
-
-| Modul | Účel |
+| Module | Purpose |
 |---|---|
-| [src/config.py](../src/config.py) | načítání `paths`, `dataset`, `solver`, `ml_models` configu |
-| [src/sampling.py](../src/sampling.py) | načtení sampling CSV do `BuildCaseRow` |
-| [src/case_builder.py](../src/case_builder.py) | build jednoho blockMesh case |
-| [src/blockmesh_generator.py](../src/blockmesh_generator.py) | generování `blockMeshDict` |
-| [src/file_editors.py](../src/file_editors.py) | úpravy `0/U` a `system/forceCoeffs` |
-| [src/case_runner.py](../src/case_runner.py) | spouštění OpenFOAM příkazů + logy + statusy |
-| [src/flow_extractor.py](../src/flow_extractor.py) | VTK čtení/interpolace/maska/NPZ export |
-
----
+| [src/config.py](../src/config.py) | loading `paths`, `dataset`, `solver`, and `ml_models` YAML configs |
+| [src/sampling.py](../src/sampling.py) | parsing sampling CSV into `BuildCaseRow` objects |
+| [src/case_builder.py](../src/case_builder.py) | building one blockMesh case folder |
+| [src/blockmesh_generator.py](../src/blockmesh_generator.py) | generating `blockMeshDict` |
+| [src/file_editors.py](../src/file_editors.py) | updating `0/U` and `system/forceCoeffs` |
+| [src/case_runner.py](../src/case_runner.py) | OpenFOAM command execution, logs, run statuses, processor cleanup |
+| [src/flow_extractor.py](../src/flow_extractor.py) | VTK loading, interpolation, mask generation, NPZ export |
 
 ## Quick Start
 
@@ -101,9 +106,7 @@ python -m scripts.extract_flow_fields
 python -m scripts.train_ml_model
 ```
 
----
-
-## Konfigurační soubory
+## Configuration files
 
 - [configs/paths.yaml](../configs/paths.yaml)
 - [configs/dataset_config.yaml](../configs/dataset_config.yaml)
