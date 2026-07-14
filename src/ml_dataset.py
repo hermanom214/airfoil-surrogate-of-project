@@ -21,13 +21,17 @@ def parse_case_params(filename: str) -> tuple[float, float] | None:
     Filename convention: ..._aoaXpY_uApB_... where XpY encodes X.Y (e.g. aoa2p5 -> 2.5 deg).
     Returns None if either parameter is missing.
     """
-    aoa_match = re.search(r"aoa(-?\d+)p(\d+)", filename)
+    aoa_match = re.search(r"aoa([m-]?\d+)p(\d+)", filename)
     u_match = re.search(r"u(\d+)p(\d+)", filename)
 
     if not aoa_match or not u_match:
         return None
 
-    aoa = float(f"{aoa_match.group(1)}.{aoa_match.group(2)}")
+    aoa_int = aoa_match.group(1)
+    # Support both aoa-4p0 and aoam4p0 notations for negative AoA.
+    if aoa_int.startswith("m"):
+        aoa_int = f"-{aoa_int[1:]}"
+    aoa = float(f"{aoa_int}.{aoa_match.group(2)}")
     inlet_u = float(f"{u_match.group(1)}.{u_match.group(2)}")
 
     return aoa, inlet_u

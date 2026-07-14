@@ -21,7 +21,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from src.config import load_ml_models_config, load_paths
 from src.ml_dataset import AirfoilFlowDataset
 from src.ml_models import build_model
-from src.ml_training import evaluate, masked_mse
+from src.ml_training import evaluate, masked_mse, train_one_epoch
 from src.ml_validation import plot_loss_curves
 
 
@@ -213,6 +213,11 @@ def main() -> None:
     model = build_model(MODEL_NAME, **model_kwargs).to(device)
     print(f"[INFO] Model: {MODEL_NAME}")
     optimizer = torch.optim.Adam(model.parameters(), lr=ML_CFG.training.learning_rate)
+    physics_available = hasattr(model, "rans_residual_loss")
+    if physics_available:
+        print("[INFO] Physics residual loss: enabled (model supports rans_residual_loss)")
+    else:
+        print("[INFO] Physics residual loss: disabled (model has no rans_residual_loss)")
 
     # Accumulators for loss history (used for the final plot)
     train_history: list[float] = []
@@ -220,25 +225,38 @@ def main() -> None:
 
     # --- Training loop -------------------------------------------------------
     for epoch in range(1, ML_CFG.training.epochs + 1):
-        if epoch < ML_CFG.physics_loss.warmup_epochs:
+        if not physics_available:
+            physics_weight = 0.0
+        elif epoch < ML_CFG.physics_loss.warmup_epochs:
             physics_weight = 0.0
         else:
             physics_weight = ML_CFG.physics_loss.weight
 
-        train_metrics = train_one_epoch_physics(
-            model=model,
-            loader=train_loader,
-            optimizer=optimizer,
-            device=device,
-            dx=dx,
-            dy=dy,
-            nu=ML_CFG.physics_loss.nu,
-            physics_weight=physics_weight,
-            u_scale=ML_CFG.physics_loss.u_scale,
-            p_scale=ML_CFG.physics_loss.p_scale,
-            pressure_is_kinematic=ML_CFG.physics_loss.pressure_is_kinematic,
-            mask_erode_pixels=ML_CFG.physics_loss.mask_erode_pixels,
-        )
+        if physics_available:
+            train_metrics = train_one_epoch_physics(
+                model=model,
+                loader=train_loader,
+                optimizer=optimizer,
+                device=device,
+                dx=dx,
+                dy=dy,
+                nu=ML_CFG.physics_loss.nu,
+                physics_weight=physics_weight,
+                u_scale=ML_CFG.physics_loss.u_scale,
+                p_scale=ML_CFG.physics_loss.p_scale,
+                pressure_is_kinematic=ML_CFG.physics_loss.pressure_is_kinematic,
+                mask_erode_pixels=ML_CFG.physics_loss.mask_erode_pixels,
+            )
+        else:
+            data_loss = train_one_epoch(model, train_loader, optimizer, device)
+            train_metrics = {
+                "loss_total": data_loss,
+                "loss_data": data_loss,
+                "loss_physics": 0.0,
+                "loss_continuity": 0.0,
+                "loss_momentum_x": 0.0,
+                "loss_momentum_y": 0.0,
+            }
         val_loss = evaluate(model, val_loader, device)                        # Evaluate on validation set
 
         train_history.append(train_metrics["loss_total"])
