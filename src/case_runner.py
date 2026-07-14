@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import re
 import shutil
 import subprocess
 import time
@@ -19,6 +20,9 @@ OF_BASH = str(PATHS.openfoam_bash)
 N_PROCS = SOLVER_CFG.case_runner.n_procs
 REQUIRED_CASE_SUBDIRS = tuple(SOLVER_CFG.case_runner.required_case_subdirs)
 
+SIMPLEFOAM_MAX_LINEAR_ITERS = 1000
+SIMPLEFOAM_RESIDUAL_STOP_THRESHOLD = 1e2
+
 
 def to_cygwin_path(path: Path) -> str:
     """
@@ -35,10 +39,11 @@ class CommandResult:
     returncode: int
     runtime_sec: float
     log_file: str
+    abort_reason: str | None = None
 
     @property
     def ok(self) -> bool:
-        return self.returncode == 0
+        return self.returncode == 0 and self.abort_reason is None
 
 
 @dataclass
@@ -85,25 +90,102 @@ def run_command(
         f"cd '{cyg_case_dir}' && {foam_command}",
     ]
 
+    abort_reason: str | None = None
+
     with log_file.open("w", encoding="utf-8") as f:
-        process = subprocess.run(
-            wrapped_command,
-            cwd=case_dir,
-            stdout=f,
-            stderr=subprocess.STDOUT,
-            text=True,
-            shell=False,
-            check=False,
-        )
+        should_watch_simplefoam = any(part == "simpleFoam" for part in command)
+
+        if not should_watch_simplefoam:
+            process = subprocess.run(
+                wrapped_command,
+                cwd=case_dir,
+                stdout=f,
+                stderr=subprocess.STDOUT,
+                text=True,
+                shell=False,
+                check=False,
+            )
+            returncode = process.returncode
+        else:
+            process = subprocess.Popen(
+                wrapped_command,
+                cwd=case_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                shell=False,
+                bufsize=1,
+            )
+
+            assert process.stdout is not None
+
+            for line in process.stdout:
+                f.write(line)
+
+                reason = detect_simplefoam_divergence_reason(line)
+                if reason is not None:
+                    abort_reason = reason
+                    process.terminate()
+                    break
+
+            if abort_reason is not None:
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=10)
+            else:
+                process.wait()
+
+            returncode = process.returncode
 
     runtime_sec = time.perf_counter() - start
 
     return CommandResult(
         command=" ".join(wrapped_command),
-        returncode=process.returncode,
+        returncode=returncode,
         runtime_sec=runtime_sec,
         log_file=str(log_file),
+        abort_reason=abort_reason,
     )
+
+
+def detect_simplefoam_divergence_reason(log_line: str) -> str | None:
+    """
+    Detect obviously divergent simpleFoam behavior from a live log line.
+    Stop only when linear solver hits max iterations and residual is NaN or huge.
+    """
+    match = re.search(
+        r"Final residual\s*=\s*([^,]+),\s*No Iterations\s*(\d+)",
+        log_line,
+    )
+    if match is None:
+        return None
+
+    residual_text = match.group(1).strip().lower()
+    try:
+        iter_count = int(match.group(2))
+    except ValueError:
+        return None
+
+    if iter_count != SIMPLEFOAM_MAX_LINEAR_ITERS:
+        return None
+
+    if residual_text in {"nan", "-nan", "+nan", "inf", "-inf", "+inf"}:
+        return "simpleFoam_diverged_nan"
+
+    try:
+        residual_value = abs(float(residual_text))
+    except ValueError:
+        return None
+
+    if residual_value >= SIMPLEFOAM_RESIDUAL_STOP_THRESHOLD:
+        return (
+            "simpleFoam_diverged_residual_"
+            f"{residual_value:.3e}_at_{SIMPLEFOAM_MAX_LINEAR_ITERS}_iters"
+        )
+
+    return None
 
 
 def discover_case_dirs(cases_root: Path) -> list[Path]:
@@ -176,7 +258,10 @@ def run_single_case(case_dir: Path) -> CaseRunResult:
                 statuses[step.status_key] = "ok"
         else:
             if step.status_key is not None:
-                statuses[step.status_key] = f"failed({result.returncode})"
+                if result.abort_reason is not None:
+                    statuses[step.status_key] = f"nOK({result.abort_reason})"
+                else:
+                    statuses[step.status_key] = f"failed({result.returncode})"
             runtime_sec = time.perf_counter() - overall_start
 
             removed_count = cleanup_processor_dirs(case_dir)
@@ -189,7 +274,7 @@ def run_single_case(case_dir: Path) -> CaseRunResult:
                 blockmesh_status=statuses["blockmesh_status"],
                 checkmesh_status=statuses["checkmesh_status"],
                 simplefoam_status=statuses["simplefoam_status"],
-                overall_status="failed",
+                overall_status="nOK" if result.abort_reason is not None else "failed",
                 runtime_sec=round(runtime_sec, 3),
             )
 

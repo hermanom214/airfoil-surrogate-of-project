@@ -1,5 +1,5 @@
 case_runner:
-  n_procs: 4
+  n_procs: 6
   required_case_subdirs: ["0", "constant", "system"]
   run_steps:
     - status_key: "blockmesh_status"
