@@ -3,11 +3,10 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 import numpy as np
-import torch
-from torch.utils.data import random_split
 
 
 def evaluate_parse_params_json(params_raw: Any) -> dict[str, Any]:
@@ -114,52 +113,54 @@ def evaluate_get_model_kwargs(model_name: str, ml_cfg: Any) -> dict[str, Any]:
     raise ValueError(f"Unsupported model in config: {model_name}")
 
 
-def evaluate_build_eval_split(dataset: Any, ml_cfg: Any) -> tuple[Any, Any, list[int], int, int]:
-    train_size = max(1, int((1.0 - ml_cfg.training.validation_split) * len(dataset)))
-    val_size = len(dataset) - train_size
+def sanitize_for_json(value: Any) -> Any:
+    if value is None:
+        return None
 
-    if val_size == 0:
-        print("[WARN] Validation split produced 0 samples. Reusing full dataset for validation.")
-        train_set = dataset
-        val_set = dataset
-        train_indices = list(range(len(dataset)))
-        return train_set, val_set, train_indices, train_size, val_size
+    if isinstance(value, Path):
+        return str(value)
 
-    generator = torch.Generator().manual_seed(ml_cfg.training.split_seed)
-    train_set, val_set = random_split(dataset, [train_size, val_size], generator=generator)
+    if isinstance(value, dict):
+        return {str(k): sanitize_for_json(v) for k, v in value.items()}
 
-    if hasattr(train_set, "indices"):
-        train_indices = list(train_set.indices)
-    else:
-        train_indices = list(range(len(dataset)))
+    if isinstance(value, list):
+        return [sanitize_for_json(v) for v in value]
 
-    return train_set, val_set, train_indices, train_size, val_size
+    if isinstance(value, tuple):
+        return [sanitize_for_json(v) for v in value]
 
+    if isinstance(value, np.ndarray):
+        if value.shape == ():
+            return sanitize_for_json(value.item())
+        return [sanitize_for_json(v) for v in value.tolist()]
 
-def evaluate_compute_split_indices(
-    dataset_len: int,
-    validation_split: float,
-    split_seed: int,
-) -> tuple[list[int], list[int]]:
-    """Return deterministic train/val indices with the same logic as training script."""
-    if dataset_len <= 0:
-        raise ValueError("dataset_len must be > 0")
+    if isinstance(value, np.integer):
+        return int(value)
 
-    train_size = max(1, int((1.0 - validation_split) * dataset_len))
-    val_size = dataset_len - train_size
+    if isinstance(value, np.floating):
+        scalar = float(value)
+        if not np.isfinite(scalar):
+            return None
+        return scalar
 
-    if val_size == 0:
-        all_idx = list(range(dataset_len))
-        return all_idx, all_idx
+    if isinstance(value, float):
+        if not np.isfinite(value):
+            return None
+        return value
 
-    generator = torch.Generator().manual_seed(split_seed)
-    permutation = torch.randperm(dataset_len, generator=generator).tolist()
-    train_idx = permutation[:train_size]
-    val_idx = permutation[train_size:]
-    return train_idx, val_idx
+    if isinstance(value, (bool, int, str)):
+        return value
 
+    if isinstance(value, np.bool_):
+        return bool(value)
 
-def evaluate_get_original_dataset_index(val_set: Any, local_idx: int) -> int:
-    if hasattr(val_set, "indices"):
-        return int(val_set.indices[local_idx])
-    return int(local_idx)
+    if isinstance(value, np.str_):
+        return str(value)
+
+    if hasattr(value, "item"):
+        try:
+            return sanitize_for_json(value.item())
+        except Exception:
+            pass
+
+    return value

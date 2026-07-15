@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import torch
 from torch.utils.data import TensorDataset, random_split
 
-from src.evaluate_io import evaluate_compute_split_indices
+from src.ml_data_split import compute_train_val_indices
 from src.ml_models import PhysicsInformedCNN
 
 
@@ -145,7 +145,7 @@ def evaluate_self_check_split_indices_consistency() -> SelfCheckResult:
     validation_split = 0.2
     split_seed = 42
 
-    train_idx_a, val_idx_a = evaluate_compute_split_indices(dataset_len, validation_split, split_seed)
+    train_idx_a, val_idx_a = compute_train_val_indices(dataset_len, validation_split, split_seed)
 
     dummy = TensorDataset(torch.arange(dataset_len, dtype=torch.float32).unsqueeze(1))
     train_size = max(1, int((1.0 - validation_split) * len(dummy)))

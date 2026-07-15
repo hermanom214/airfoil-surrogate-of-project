@@ -8,20 +8,24 @@ from __future__ import annotations
 import sys
 from dataclasses import asdict
 from pathlib import Path
-from typing import Protocol, cast
 
 import numpy as np
 import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 
 # Allow imports from the project root (src/ package)
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from src.config import load_ml_models_config, load_paths
+from src.ml_data_split import build_train_val_split
 from src.ml_dataset import AirfoilFlowDataset
 from src.ml_models import build_model
-from src.ml_training import compute_grid_spacing_from_xy, evaluate, masked_mse, train_one_epoch
+from src.ml_training import (
+    compute_grid_spacing_from_xy,
+    evaluate,
+    train_one_epoch,
+    train_one_epoch_physics,
+)
 from src.ml_validation import plot_loss_curves
 
 
@@ -37,111 +41,14 @@ MODEL_OUTPUT_FILENAME = ML_CFG.output.filename_template.format(model_name=MODEL_
 OUTPUT_PATH = PATHS.project_root / ML_CFG.output.models_subdir / MODEL_OUTPUT_FILENAME
 
 
-class PhysicsLossModel(Protocol):
-    def rans_residual_loss(
-        self,
-        pred: torch.Tensor,
-        fluid_mask: torch.Tensor,
-        dx: float,
-        dy: float,
-        nu: float,
-        p_mean: float,
-        p_std: float,
-        ux_mean: float,
-        ux_std: float,
-        uy_mean: float,
-        uy_std: float,
-        nu_t: torch.Tensor | None = None,
-        pressure_is_kinematic: bool = True,
-        mask_erode_pixels: int = 1,
-    ) -> dict[str, torch.Tensor]:
-        ...
-
-
 def _load_reference_grid_spacing(data_dir: Path) -> tuple[float, float]:
     files = sorted(data_dir.glob("*_flow.npz"))
     if not files:
         raise RuntimeError(f"No *_flow.npz files found in {data_dir}")
 
-    with np.load(files[0]) as data:
+    with np.load(files[0], allow_pickle=False) as data:
         xy = torch.from_numpy(data["xy"].astype(np.float32))
     return compute_grid_spacing_from_xy(xy)
-
-
-def train_one_epoch_physics(
-    model: nn.Module,
-    loader: DataLoader,
-    optimizer: torch.optim.Optimizer,
-    device: str,
-    dx: float,
-    dy: float,
-    nu: float,
-    p_mean: float,
-    p_std: float,
-    ux_mean: float,
-    ux_std: float,
-    uy_mean: float,
-    uy_std: float,
-    physics_weight: float,
-    pressure_is_kinematic: bool,
-    mask_erode_pixels: int,
-) -> dict[str, float]:
-    if not hasattr(model, "rans_residual_loss"):
-        raise TypeError("Selected model does not implement rans_residual_loss")
-
-    physics_model = cast(PhysicsLossModel, model)
-    model.train()
-
-    totals = {
-        "loss_total": 0.0,
-        "loss_data": 0.0,
-        "loss_physics": 0.0,
-        "loss_continuity": 0.0,
-        "loss_momentum_x": 0.0,
-        "loss_momentum_y": 0.0,
-    }
-
-    for inp, target, mask in loader:
-        inp = inp.to(device)
-        target = target.to(device)
-        mask = mask.to(device)
-
-        pred = model(inp)
-
-        loss_data = masked_mse(pred, target, mask)
-        phys = physics_model.rans_residual_loss(
-            pred=pred,
-            fluid_mask=mask,
-            dx=dx,
-            dy=dy,
-            nu=nu,
-            p_mean=p_mean,
-            p_std=p_std,
-            ux_mean=ux_mean,
-            ux_std=ux_std,
-            uy_mean=uy_mean,
-            uy_std=uy_std,
-            pressure_is_kinematic=pressure_is_kinematic,
-            mask_erode_pixels=mask_erode_pixels,
-        )
-        loss_total = loss_data + physics_weight * phys["physics_loss"]
-
-        optimizer.zero_grad()
-        loss_total.backward()
-        optimizer.step()
-
-        totals["loss_total"] += float(loss_total.item())
-        totals["loss_data"] += float(loss_data.item())
-        totals["loss_physics"] += float(phys["physics_loss"].item())
-        totals["loss_continuity"] += float(phys["continuity_loss"].item())
-        totals["loss_momentum_x"] += float(phys["momentum_x_loss"].item())
-        totals["loss_momentum_y"] += float(phys["momentum_y_loss"].item())
-
-    n_batches = len(loader)
-    if n_batches == 0:
-        raise RuntimeError("Training loader has zero batches")
-
-    return {k: v / n_batches for k, v in totals.items()}
 
 
 def main() -> None:
@@ -158,23 +65,16 @@ def main() -> None:
     dx, dy = _load_reference_grid_spacing(DATA_DIR)
     print(f"[INFO] Grid spacing | dx: {dx:.6e} | dy: {dy:.6e}")
 
-    # Split dataset 80/20 into training and validation subsets
-    train_size = max(1, int((1.0 - ML_CFG.training.validation_split) * len(dataset)))
-    val_size = len(dataset) - train_size
-
-    if val_size == 0:
-        # If dataset is too small to split, reuse it for both sets
-        train_set = dataset
-        val_set = dataset
-    else:
-        generator = torch.Generator().manual_seed(ML_CFG.training.split_seed)
-        train_set, val_set = random_split(dataset, [train_size, val_size], generator=generator)
+    split = build_train_val_split(
+        dataset=dataset,
+        validation_split=ML_CFG.training.validation_split,
+        split_seed=ML_CFG.training.split_seed,
+    )
+    train_set = split.train_set
+    val_set = split.val_set
+    train_indices = split.train_indices
 
     # Fit condition normalisation from training samples only
-    if hasattr(train_set, "indices"):
-        train_indices = list(train_set.indices)
-    else:
-        train_indices = list(range(len(dataset)))
     dataset.fit_condition_normalization(train_indices)
     dataset.fit_target_normalization(train_indices)
     print(

@@ -3,7 +3,7 @@
 import json
 import sys
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -14,10 +14,9 @@ sys.path.append(str(PROJECT_ROOT))
 
 from src.config import load_ml_models_config, load_paths
 from src.evaluate_io import (
-    evaluate_build_eval_split,
     evaluate_extract_case_meta,
     evaluate_get_model_kwargs,
-    evaluate_get_original_dataset_index,
+    sanitize_for_json,
 )
 from src.evaluate_metrics import (
     evaluate_build_case_metrics,
@@ -33,30 +32,11 @@ from src.evaluate_plotting import (
     evaluate_plot_fields_comparison,
     evaluate_plot_velocity_comparison,
 )
+from src.ml_data_split import build_train_val_split
 from src.ml_dataset import AirfoilFlowDataset, parse_case_params
 from src.ml_models import build_model
+from src.ml_protocols import PhysicsLossModel
 from src.ml_training import compute_grid_spacing_from_xy, masked_mse
-
-
-class PhysicsLossModel(Protocol):
-    def rans_residual_loss(
-        self,
-        pred: torch.Tensor,
-        fluid_mask: torch.Tensor,
-        dx: float,
-        dy: float,
-        nu: float,
-        p_mean: float,
-        p_std: float,
-        ux_mean: float,
-        ux_std: float,
-        uy_mean: float,
-        uy_std: float,
-        nu_t: torch.Tensor | None = None,
-        pressure_is_kinematic: bool = True,
-        mask_erode_pixels: int = 1,
-    ) -> dict[str, torch.Tensor]:
-        ...
 
 
 @torch.no_grad()
@@ -88,7 +68,15 @@ def run_validation() -> None:
     if len(dataset) == 0:
         raise RuntimeError(f"Dataset is empty in: {data_dir}")
 
-    _, val_set, train_indices, train_size, val_size = evaluate_build_eval_split(dataset, ml_cfg)
+    split = build_train_val_split(
+        dataset=dataset,
+        validation_split=ml_cfg.training.validation_split,
+        split_seed=ml_cfg.training.split_seed,
+    )
+    val_set = split.val_set
+    train_indices = split.train_indices
+    train_size = split.train_size
+    val_size = split.val_size
     dataset.fit_condition_normalization(train_indices)
     dataset.fit_target_normalization(train_indices)
 
@@ -100,10 +88,17 @@ def run_validation() -> None:
     model = build_model(model_name, **model_kwargs).to(device)
 
     try:
-        state_dict = torch.load(model_path, map_location=device)
-        model.load_state_dict(state_dict)
-    except Exception as exc:
-        raise RuntimeError(f"Failed to load model weights/state_dict from {model_path}: {exc}") from exc
+        state_dict = torch.load(
+            model_path,
+            map_location=device,
+            weights_only=True,
+        )
+    except TypeError:
+        state_dict = torch.load(
+            model_path,
+            map_location=device,
+        )
+    model.load_state_dict(state_dict)
 
     model.eval()
     physics_available = model_name == "rans_pinn" and hasattr(model, "rans_residual_loss")
@@ -120,27 +115,46 @@ def run_validation() -> None:
 
     rows: list[dict[str, Any]] = []
     failed_cases: list[dict[str, str]] = []
-    warned_mask_rotation = False
+    warned_mask_metadata_missing = False
 
     global_agg = evaluate_init_global_aggregator()
 
     for local_idx in range(len(val_set)):
         try:
-            original_idx = evaluate_get_original_dataset_index(val_set, local_idx)
+            original_idx = split.val_indices[local_idx]
             npz_path = dataset.files[original_idx]
 
-            inp, target_norm, mask_tensor = dataset[original_idx]
+            inp, target_norm, _ = dataset[original_idx]
             inp_batch = inp.unsqueeze(0).to(device)
             pred_norm = model(inp_batch)[0].cpu()
 
             pred_batch = pred_norm.unsqueeze(0)
             target_batch = target_norm.unsqueeze(0)
-            mask_batch = mask_tensor.unsqueeze(0)
-            normalized_loss = float(masked_mse(pred_batch, target_batch, mask_batch).item())
 
             pred_np = pred_norm.numpy()
             target_np = target_norm.numpy()
-            fluid_mask = (mask_tensor.numpy()[0] > 0.5)
+
+            with np.load(npz_path, allow_pickle=False) as npz:
+                xy = npz["xy"].astype(np.float32)
+                p_true = npz["p"].astype(np.float32)
+                u_true = npz["U"].astype(np.float32)
+                fluid_mask_npz = npz["fluid_mask"].astype(np.float32) > 0.5
+                fluid_mask = fluid_mask_npz
+                ux_true = u_true[:, :, 0]
+                uy_true = u_true[:, :, 1]
+
+                if "mask_rotation_applied" in npz.files:
+                    if not bool(np.array(npz["mask_rotation_applied"]).item()):
+                        print(f"[WARN] mask_rotation_applied is False in {npz_path.name}.")
+                elif not warned_mask_metadata_missing:
+                    print("[WARN] Mask rotation metadata not found; mask is used as stored in NPZ.")
+                    warned_mask_metadata_missing = True
+
+                parsed = parse_case_params(npz_path.name)
+                meta = evaluate_extract_case_meta(npz, npz_path, parsed)
+
+            mask_batch = torch.from_numpy(fluid_mask.astype(np.float32)).unsqueeze(0).unsqueeze(0)
+            normalized_loss = float(masked_mse(pred_batch, target_batch, mask_batch).item())
 
             p_pred = pred_np[0] * dataset.p_std + dataset.p_mean
             ux_pred = pred_np[1] * dataset.ux_std + dataset.ux_mean
@@ -149,21 +163,6 @@ def run_validation() -> None:
             p_target = target_np[0] * dataset.p_std + dataset.p_mean
             ux_target = target_np[1] * dataset.ux_std + dataset.ux_mean
             uy_target = target_np[2] * dataset.uy_std + dataset.uy_mean
-
-            with np.load(npz_path, allow_pickle=True) as npz:
-                xy = npz["xy"].astype(np.float32)
-                p_true = npz["p"].astype(np.float32)
-                u_true = npz["U"].astype(np.float32)
-                fluid_mask_npz = npz["fluid_mask"].astype(np.float32) > 0.5
-                ux_true = u_true[:, :, 0]
-                uy_true = u_true[:, :, 1]
-
-                if not np.array_equal(fluid_mask, fluid_mask_npz):
-                    print(f"[WARN] Dataset mask differs from NPZ mask for {npz_path.name}. Using NPZ mask.")
-                fluid_mask = fluid_mask_npz
-
-                parsed = parse_case_params(npz_path.name)
-                meta = evaluate_extract_case_meta(npz, npz_path, parsed)
 
             dx, dy = compute_grid_spacing_from_xy(torch.from_numpy(xy.astype(np.float32)))
 
@@ -176,13 +175,6 @@ def run_validation() -> None:
                     "[WARN] Denormalized target does not fully match NPZ values in fluid cells "
                     f"for {npz_path.name}."
                 )
-
-            params_aoa = meta["params"].get("aoa_deg", None)
-            if params_aoa is not None and abs(float(params_aoa)) > 1e-12 and not warned_mask_rotation:
-                print(
-                    "[WARN] Stored fluid mask may not include AoA rotation; near-wall metrics should be interpreted cautiously."
-                )
-                warned_mask_rotation = True
 
             speed_true = np.sqrt(ux_true ** 2 + uy_true ** 2)
             speed_pred = np.sqrt(ux_pred ** 2 + uy_pred ** 2)
@@ -384,7 +376,11 @@ def run_validation() -> None:
             "val_size": int(val_size),
         }
 
-    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    sanitized_summary = sanitize_for_json(summary)
+    summary_path.write_text(
+        json.dumps(sanitized_summary, indent=2, allow_nan=False),
+        encoding="utf-8",
+    )
 
     if not metrics_df.empty:
         evaluate_generate_dataset_level_plot(metrics_df, dataset_plot_path)

@@ -219,6 +219,10 @@ def extract_single_case(
         aoa_deg=aoa_deg,
     )
 
+    mask_rotation_center_x = 0.25 * chord
+    mask_rotation_center_y = 0.0
+    mask_rotation_angle_deg = -aoa_deg
+
     plausibility = evaluate_plausibility(
         xy=xy_grid,
         p=p_grid,
@@ -245,6 +249,10 @@ def extract_single_case(
         p=p_grid,
         U=U_grid,
         fluid_mask=fluid_mask,
+        mask_rotation_applied=True,
+        mask_rotation_center_x=mask_rotation_center_x,
+        mask_rotation_center_y=mask_rotation_center_y,
+        mask_rotation_angle_deg=mask_rotation_angle_deg,
         case_id=case_id,
         latest_time=latest_time,
         vtk_file=str(vtk_file),

@@ -127,10 +127,10 @@ class AirfoilFlowDataset(Dataset):
         count = 0
 
         for i in selected_indices:
-            data = np.load(self.files[i])
-            p = data["p"].astype(np.float32)
-            U = data["U"].astype(np.float32)
-            mask = data["fluid_mask"].astype(np.float32) > 0.5
+            with np.load(self.files[i], allow_pickle=False) as data:
+                p = data["p"].astype(np.float32)
+                U = data["U"].astype(np.float32)
+                mask = data["fluid_mask"].astype(np.float32) > 0.5
 
             p_vals = p[mask]
             ux_vals = U[:, :, 0][mask]
@@ -171,13 +171,12 @@ class AirfoilFlowDataset(Dataset):
         Mask            : fluid_mask with an added channel dimension (1, H, W).
         """
         path = self.files[idx]
-        data = np.load(path)
-
-        # Load raw arrays from the .npz file
-        xy = data["xy"].astype(np.float32)
-        p = data["p"].astype(np.float32)
-        U = data["U"].astype(np.float32)
-        mask = data["fluid_mask"].astype(np.float32)
+        with np.load(path, allow_pickle=False) as data:
+            # Load raw arrays from the .npz file and copy into memory before closing NPZ.
+            xy = data["xy"].astype(np.float32)
+            p = data["p"].astype(np.float32)
+            U = data["U"].astype(np.float32)
+            mask = data["fluid_mask"].astype(np.float32)
 
         # Parse flow conditions from the filename
         params = parse_case_params(path.name)
@@ -223,7 +222,7 @@ class AirfoilFlowDataset(Dataset):
         )
 
         return (
-            torch.tensor(inp),
-            torch.tensor(target),
-            torch.tensor(mask[None, :, :]),  # mask: (1, H, W)
+            torch.from_numpy(inp),
+            torch.from_numpy(target),
+            torch.from_numpy(mask[None, :, :]),  # mask: (1, H, W)
         )

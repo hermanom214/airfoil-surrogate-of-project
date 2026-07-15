@@ -220,27 +220,28 @@ def evaluate_update_global_aggregator(
     velocity_vector_error: np.ndarray,
     fluid_mask: np.ndarray,
 ) -> None:
-    p_diff = (p_pred - p_true)[fluid_mask]
-    ux_diff = (ux_pred - ux_true)[fluid_mask]
-    uy_diff = (uy_pred - uy_true)[fluid_mask]
-    speed_diff = (speed_pred - speed_true)[fluid_mask]
-    vec_diff = velocity_vector_error[fluid_mask]
+    valid = (
+        fluid_mask
+        & np.isfinite(p_pred)
+        & np.isfinite(p_true)
+        & np.isfinite(ux_pred)
+        & np.isfinite(ux_true)
+        & np.isfinite(uy_pred)
+        & np.isfinite(uy_true)
+        & np.isfinite(speed_pred)
+        & np.isfinite(speed_true)
+        & np.isfinite(velocity_vector_error)
+    )
 
-    p_diff = p_diff[np.isfinite(p_diff)]
-    ux_diff = ux_diff[np.isfinite(ux_diff)]
-    uy_diff = uy_diff[np.isfinite(uy_diff)]
-    speed_diff = speed_diff[np.isfinite(speed_diff)]
-    vec_diff = vec_diff[np.isfinite(vec_diff)]
-
-    n_cells = int(min(p_diff.size, ux_diff.size, uy_diff.size, speed_diff.size, vec_diff.size))
-    if n_cells <= 0:
+    n_cells = int(np.count_nonzero(valid))
+    if n_cells == 0:
         return
 
-    p_diff = p_diff[:n_cells]
-    ux_diff = ux_diff[:n_cells]
-    uy_diff = uy_diff[:n_cells]
-    speed_diff = speed_diff[:n_cells]
-    vec_diff = vec_diff[:n_cells]
+    p_diff = (p_pred - p_true)[valid]
+    ux_diff = (ux_pred - ux_true)[valid]
+    uy_diff = (uy_pred - uy_true)[valid]
+    speed_diff = (speed_pred - speed_true)[valid]
+    vec_diff = velocity_vector_error[valid]
 
     agg["fluid_cells"] = int(agg["fluid_cells"]) + n_cells
     agg["p_abs_sum"] = float(agg["p_abs_sum"]) + float(np.abs(p_diff).sum())
