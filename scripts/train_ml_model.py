@@ -21,7 +21,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from src.config import load_ml_models_config, load_paths
 from src.ml_dataset import AirfoilFlowDataset
 from src.ml_models import build_model
-from src.ml_training import evaluate, masked_mse, train_one_epoch
+from src.ml_training import compute_grid_spacing_from_xy, evaluate, masked_mse, train_one_epoch
 from src.ml_validation import plot_loss_curves
 
 
@@ -45,34 +45,17 @@ class PhysicsLossModel(Protocol):
         dx: float,
         dy: float,
         nu: float,
+        p_mean: float,
+        p_std: float,
+        ux_mean: float,
+        ux_std: float,
+        uy_mean: float,
+        uy_std: float,
         nu_t: torch.Tensor | None = None,
-        u_scale: float = 50.0,
-        p_scale: float = 1000.0,
         pressure_is_kinematic: bool = True,
         mask_erode_pixels: int = 1,
     ) -> dict[str, torch.Tensor]:
         ...
-
-
-def _compute_grid_spacing(xy: torch.Tensor) -> tuple[float, float]:
-    if xy.ndim != 3 or xy.shape[-1] != 2:
-        raise ValueError("xy grid tensor must have shape [H, W, 2]")
-
-    x = xy[:, :, 0]
-    y = xy[:, :, 1]
-
-    dx_candidates = torch.abs(x[:, 1:] - x[:, :-1]).reshape(-1)
-    dy_candidates = torch.abs(y[1:, :] - y[:-1, :]).reshape(-1)
-
-    dx_valid = dx_candidates[dx_candidates > 0]
-    dy_valid = dy_candidates[dy_candidates > 0]
-
-    if dx_valid.numel() == 0 or dy_valid.numel() == 0:
-        raise RuntimeError("Unable to infer positive dx/dy from xy grid")
-
-    dx = float(dx_valid.median().item())
-    dy = float(dy_valid.median().item())
-    return dx, dy
 
 
 def _load_reference_grid_spacing(data_dir: Path) -> tuple[float, float]:
@@ -82,7 +65,7 @@ def _load_reference_grid_spacing(data_dir: Path) -> tuple[float, float]:
 
     with np.load(files[0]) as data:
         xy = torch.from_numpy(data["xy"].astype(np.float32))
-    return _compute_grid_spacing(xy)
+    return compute_grid_spacing_from_xy(xy)
 
 
 def train_one_epoch_physics(
@@ -93,9 +76,13 @@ def train_one_epoch_physics(
     dx: float,
     dy: float,
     nu: float,
+    p_mean: float,
+    p_std: float,
+    ux_mean: float,
+    ux_std: float,
+    uy_mean: float,
+    uy_std: float,
     physics_weight: float,
-    u_scale: float,
-    p_scale: float,
     pressure_is_kinematic: bool,
     mask_erode_pixels: int,
 ) -> dict[str, float]:
@@ -128,8 +115,12 @@ def train_one_epoch_physics(
             dx=dx,
             dy=dy,
             nu=nu,
-            u_scale=u_scale,
-            p_scale=p_scale,
+            p_mean=p_mean,
+            p_std=p_std,
+            ux_mean=ux_mean,
+            ux_std=ux_std,
+            uy_mean=uy_mean,
+            uy_std=uy_std,
             pressure_is_kinematic=pressure_is_kinematic,
             mask_erode_pixels=mask_erode_pixels,
         )
@@ -241,9 +232,13 @@ def main() -> None:
                 dx=dx,
                 dy=dy,
                 nu=ML_CFG.physics_loss.nu,
+                p_mean=dataset.p_mean,
+                p_std=dataset.p_std,
+                ux_mean=dataset.ux_mean,
+                ux_std=dataset.ux_std,
+                uy_mean=dataset.uy_mean,
+                uy_std=dataset.uy_std,
                 physics_weight=physics_weight,
-                u_scale=ML_CFG.physics_loss.u_scale,
-                p_scale=ML_CFG.physics_loss.p_scale,
                 pressure_is_kinematic=ML_CFG.physics_loss.pressure_is_kinematic,
                 mask_erode_pixels=ML_CFG.physics_loss.mask_erode_pixels,
             )

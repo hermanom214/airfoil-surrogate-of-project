@@ -23,8 +23,8 @@ physics_loss:
   nu: 1.5e-5 # kinematická viskozita [m^2/s], typicky 1e-6 až 1e-4 dle média
   weight: 1.0e-8 # váha physics loss, rozumně 1e-10 až 1e-3
   warmup_epochs: 30 # rozumně 0 až ~50 % celkových epoch
-  u_scale: 50.0 # škála rychlosti pro denormalizaci v residualu, typicky 10–100
-  p_scale: 1000.0 # škála tlaku pro denormalizaci v residualu, typicky 100–5000
+  u_scale: 50.0 # deprecated: physics residual now uses dataset ux/uy mean/std denormalization
+  p_scale: 1000.0 # deprecated: physics residual now uses dataset p mean/std denormalization
   pressure_is_kinematic: true # true pro kinematický tlak p/rho, false pro absolutní tlak
   mask_erode_pixels: 1 # rozumně 0–3 (větší = menší vliv stěnových buněk)
 

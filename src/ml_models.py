@@ -56,7 +56,8 @@ class SimpleUNet(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Forward pass (U-Net)
+        # Forward pass (U-Net).
+        # Model output channel order is [p, Ux, Uy], consistent with AirfoilFlowDataset.
 #
 # Input:
 # x: (B, 5, H, W)
@@ -120,7 +121,7 @@ class SimpleUNet(nn.Module):
 # ------
 # out = self.out(d1)
 # → (B, 32, H, W) → (B, 3, H, W)
-#   1×1 convolution – maps feature maps to physical quantities (e.g. Ux, Uy, p)
+#   1×1 convolution – maps feature maps to physical quantities in order [p, Ux, Uy]
 #
 # Summary:
 # encoder → compresses spatial resolution, learns context
@@ -152,7 +153,8 @@ class PhysicsInformedCNN(nn.Module):
     """
     Physics-informed CNN surrogate for 2D steady incompressible airfoil flow.
 
-    Current version predicts [u, v, p] from per-cell input features and uses
+    Model output channel order is [p, Ux, Uy], consistent with AirfoilFlowDataset.
+    Current version predicts [p, u, v] from per-cell input features and uses
     RANS residual terms (continuity + momentum equations) as a physics loss.
 
     Project note for SST k-omega turbulence:
@@ -233,19 +235,29 @@ class PhysicsInformedCNN(nn.Module):
         dx: float,
         dy: float,
         nu: float,
+        p_mean: float,
+        p_std: float,
+        ux_mean: float,
+        ux_std: float,
+        uy_mean: float,
+        uy_std: float,
         nu_t: torch.Tensor | None = None,
-        u_scale: float = 50.0,
-        p_scale: float = 1000.0,
         pressure_is_kinematic: bool = True,
         mask_erode_pixels: int = 1,
     ) -> dict[str, torch.Tensor]:
         """
         Returns masked loss terms of steady incompressible 2D RANS residuals.
+        Expects prediction channels in order [p_norm, ux_norm, uy_norm].
         """
 
-        u = pred[:, 0:1, :, :] * u_scale
-        v = pred[:, 1:2, :, :] * u_scale
-        p = pred[:, 2:3, :, :] * p_scale
+        # Model output channel order is [p, Ux, Uy], consistent with AirfoilFlowDataset.
+        p_norm = pred[:, 0:1, :, :]
+        u_norm = pred[:, 1:2, :, :]
+        v_norm = pred[:, 2:3, :, :]
+
+        p = p_norm * p_std + p_mean
+        u = u_norm * ux_std + ux_mean
+        v = v_norm * uy_std + uy_mean
 
         mask = self._erode_mask(fluid_mask, mask_erode_pixels)
         if mask.shape[1] != 1:
@@ -291,7 +303,10 @@ class PhysicsInformedCNN(nn.Module):
 
 
 def build_model(model_name: str, **kwargs) -> nn.Module:
-    """Factory for selecting a model architecture from AVAILABLE_MODELS."""
+    """Factory for selecting a model architecture from AVAILABLE_MODELS.
+
+    All supported models output channels in order [p, Ux, Uy].
+    """
 
     key = model_name.lower().strip()
     if key == "simple_unet":

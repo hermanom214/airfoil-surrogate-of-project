@@ -19,10 +19,12 @@ from pathlib import Path
 
 import numpy as np
 from scipy.interpolate import griddata
+from shapely.affinity import rotate as shapely_rotate
 from shapely.geometry import Point, Polygon
 
 from src.case_runner import run_command, discover_case_dirs
 from src.config import load_solver_config
+from src.inspect_plausibility import evaluate_plausibility
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -204,12 +206,36 @@ def extract_single_case(
 
     naca_code = str(params["naca_code"])
     chord = float(params.get("chord", 1.0))
+    if "aoa_deg" in params:
+        aoa_deg = float(params["aoa_deg"])
+    else:
+        aoa_deg = 0.0
+        print(f"[WARN] Missing 'aoa_deg' in params.json for {case_id}; using 0.0 deg for mask.")
 
     fluid_mask = create_fluid_mask(
         xy_grid=xy_grid,
         naca_code=naca_code,
         chord=chord,
+        aoa_deg=aoa_deg,
     )
+
+    plausibility = evaluate_plausibility(
+        xy=xy_grid,
+        p=p_grid,
+        u=U_grid,
+        fluid_mask=fluid_mask,
+        case_name=f"{case_id}_flow.npz",
+    )
+    if plausibility.plausibility != "OK":
+        return FlowExtractionResult(
+            case_id=case_id,
+            case_path=str(case_dir),
+            status=f"plausibility_nok({plausibility.reason})",
+            output_file="",
+            nx=nx,
+            ny=ny,
+            latest_time=latest_time,
+        )
 
     output_file = output_root / f"{case_id}_flow.npz"
 
@@ -263,6 +289,7 @@ def write_flow_index(results: list[FlowExtractionResult], output_csv: Path) -> N
 def generate_naca4_polygon(
     naca_code: str,
     chord: float = 1.0,
+    aoa_deg: float = 0.0,
     n_points: int = 1200,
 ) -> Polygon:
     m = int(naca_code[0]) / 100.0
@@ -307,18 +334,93 @@ def generate_naca4_polygon(
     lower = list(zip(xl[::-1], yl[::-1]))
 
     coords = upper + lower
+    polygon = Polygon(coords)
 
-    return Polygon(coords)
+    # Keep aoa=0 behavior identical to historical implementation.
+    if abs(float(aoa_deg)) <= 1e-12:
+        return polygon
+
+    # Match blockMesh orientation convention:
+    # geometry is rotated by -aoa_deg around quarter chord (0.25*c, 0.0).
+    rotation_origin = (0.25 * chord, 0.0)
+    polygon = shapely_rotate(
+        polygon,
+        -float(aoa_deg),
+        origin=rotation_origin,
+        use_radians=False,
+    )
+    return polygon
+
+
+def _warn_if_rotation_has_no_effect(
+    rotated_polygon: Polygon,
+    naca_code: str,
+    chord: float,
+    aoa_deg: float,
+) -> None:
+    if abs(float(aoa_deg)) <= 0.1:
+        return
+
+    baseline_polygon = generate_naca4_polygon(
+        naca_code=naca_code,
+        chord=chord,
+        aoa_deg=0.0,
+    )
+
+    rb = np.array(rotated_polygon.bounds, dtype=np.float64)
+    bb = np.array(baseline_polygon.bounds, dtype=np.float64)
+    if np.allclose(rb, bb, rtol=0.0, atol=1e-12):
+        print("[WARN] Mask rotation appears to have no effect.")
+
+
+def plot_mask_overlay(
+    xy_grid: np.ndarray,
+    p_field: np.ndarray,
+    polygon: Polygon,
+    title: str = "",
+) -> None:
+    """Debug helper: plot pressure field with polygon contour overlay."""
+    import matplotlib.pyplot as plt
+
+    x = xy_grid[:, :, 0]
+    y = xy_grid[:, :, 1]
+
+    fig, ax = plt.subplots(figsize=(8, 4.8))
+    im = ax.imshow(
+        p_field,
+        origin="lower",
+        extent=[float(x.min()), float(x.max()), float(y.min()), float(y.max())],
+        aspect="equal",
+        cmap="turbo",
+    )
+
+    px, py = polygon.exterior.xy
+    ax.plot(px, py, color="red", linewidth=1.5)
+
+    ax.set_xlabel("x [m]")
+    ax.set_ylabel("y [m]")
+    ax.set_title(title or "Pressure with fluid-mask polygon overlay")
+    plt.colorbar(im, ax=ax, label="p")
+    fig.tight_layout()
+    plt.show()
 
 def create_fluid_mask(
     xy_grid: np.ndarray,
     naca_code: str,
     chord: float = 1.0,
+    aoa_deg: float = 0.0,
 ) -> np.ndarray:
     """Return 1.0 in fluid cells and 0.0 inside the airfoil polygon."""
     polygon = generate_naca4_polygon(
         naca_code=naca_code,
         chord=chord,
+        aoa_deg=aoa_deg,
+    )
+    _warn_if_rotation_has_no_effect(
+        rotated_polygon=polygon,
+        naca_code=naca_code,
+        chord=chord,
+        aoa_deg=aoa_deg,
     )
 
     ny, nx, _ = xy_grid.shape
