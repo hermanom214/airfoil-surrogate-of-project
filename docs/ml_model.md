@@ -8,12 +8,13 @@
 
 - `simple_unet`
 - `rans_pinn`
+- `clcd_mlp`
 
 Defined in [src/ml_models.py](../src/ml_models.py).
 
 ## Architecture snapshot
 
-Both models use the same dataset interface:
+Spatial models use the same dataset interface:
 - input tensor shape: `(B, 5, H, W)`
 - output tensor shape: `(B, 3, H, W)`
 - output channels represent `(p, Ux, Uy)` in normalized form.
@@ -61,6 +62,27 @@ Configurable parameters:
 Use case:
 - preferred when enforcing PDE consistency together with supervised data fit.
 
+### 3) `clcd_mlp` (scalar regressor for aerodynamic coefficients)
+
+Implementation: [src/ml_models.py](../src/ml_models.py), class `ClCdMLP`
+
+Input feature order:
+- `camber_percent`
+- `camber_position_tenths`
+- `thickness_percent`
+- `aoa_deg`
+- `inlet_velocity`
+
+Target order:
+- `Cl`
+- `Cd`
+
+Configurable parameters:
+- `input_dim`, `hidden_dims`, `output_dim`, `dropout`
+
+Use case:
+- rapid scalar prediction of aerodynamic coefficients without reconstructing full flow fields.
+
 ## Config-driven ML setup
 
 All ML-related hardcoded parameters were moved to:
@@ -82,11 +104,33 @@ Loader and dataclasses:
 - expected sample format: `*_flow.npz`
 - target channels: pressure + velocity components (`p`, `Ux`, `Uy`)
 
+Scalar Cl/Cd dataset interface:
+
+- dataset class: [src/ml_clcd_dataset.py](../src/ml_clcd_dataset.py)
+- source: OpenFOAM case folders + `forceCoeffs.dat`
+- robust parsing:
+	- parse `Time`, `Cd`, `Cl` columns
+	- finite-only row filtering
+	- minimum valid iteration threshold
+	- finite-check of tail averages
+	- tracked skip reasons per case
+- safe normalization:
+	- finite checks before statistics
+	- finite checks of statistics
+	- lower bound on std
+
 ## Training loop components
 
 - masked data loss and evaluation: [src/ml_training.py](../src/ml_training.py)
 - physics-informed residual loss: in model implementation ([src/ml_models.py](../src/ml_models.py))
 - loss curve plotting: [src/ml_validation.py](../src/ml_validation.py)
+
+For `clcd_mlp` training path in [scripts/train_ml_model.py](../scripts/train_ml_model.py):
+
+- non-finite training and validation loss detection (`torch.isfinite`)
+- refusal to save model on non-finite `train_history`/`val_history`
+- checkpoint dictionary save (not only raw state dict)
+- checkpoint includes normalization stats, feature/target order, and split metadata
 
 ## Typical execution
 
@@ -95,3 +139,26 @@ python -m scripts.train_ml_model
 ```
 
 Model weights and plots are written according to `output.*` in [configs/ml_models_config.yaml](../configs/ml_models_config.yaml).
+
+## Evaluation
+
+Spatial branch (`simple_unet`, `rans_pinn`):
+
+```bash
+python -m scripts.evaluate_ml_model
+```
+
+Scalar branch (`clcd_mlp`):
+
+```bash
+python -m scripts.evaluate_clcd_model
+```
+
+Scalar evaluation outputs:
+
+- metrics CSV and summary JSON in `data/models/clcd_mlp_validation/metrics`
+- plots in `data/models/clcd_mlp_validation/figures`
+- global metrics are reported separately for Cl and Cd (MAE, RMSE, Bias, MedAE, MaxAE, R2)
+
+Reusable scalar inference API is in [src/clcd_inference.py](../src/clcd_inference.py),
+designed for evaluation, future GUI, REST API, and standalone predictions.

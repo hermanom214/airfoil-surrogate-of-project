@@ -10,6 +10,10 @@
 
 These steps are defined in [configs/solver_config.yaml](../configs/solver_config.yaml) under `case_runner.run_steps`.
 
+Besides field outputs (`p`, `U`) used by spatial surrogate models,
+the CFD workflow also provides force-coefficient history (`forceCoeffs.dat`) used by
+the scalar `clcd_mlp` training/evaluation branch.
+
 ## CFD base case setup (manual-style summary)
 
 Template used for all generated cases:
@@ -131,7 +135,11 @@ For each case:
 Global summary:
 - `run_status.csv` in the cases root
 
+Per-case force coefficients (for scalar branch):
+- `postProcessing/forceCoeffs1/0/forceCoeffs.dat`
+
 ## Notes
 
 - `simpleFoam` stays parallel (MPI), as required by current workflow.
 - If one step fails for a case, remaining steps for that case are skipped and status is marked as failed.
+- Scalar Cl/Cd ML pipeline reads only converged finite tail data from `forceCoeffs.dat`; incomplete or corrupted cases are skipped during dataset build.

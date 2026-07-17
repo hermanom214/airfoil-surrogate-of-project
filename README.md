@@ -1,145 +1,128 @@
-# Airfoil Surrogate Model – OpenFOAM + ML Pipeline
+# Airfoil Surrogate Model - OpenFOAM + ML Pipeline
 
 ## O projektu
 
-Projekt buduje end-to-end pipeline pro **náhradu (surrogate) CFD simulací** obtékání profilů NACA pomocí hlubokého učení. Cílem je natrénovat neuronovou síť, která na základě geometrie profilu a podmínek proudění (úhel náběhu, rychlost) předpoví celá 2D pole tlaku a rychlosti – bez nutnosti spouštět OpenFOAM pro každý nový případ.
+Projekt implementuje end-to-end pipeline pro surrogate modelovani 2D obtokoveho CFD nad NACA profily.
 
-### Cíl
+Aktualne existuji dve paralelni ML vetve:
 
-1. Parametricky vygenerovat sadu NACA profilů a kombinovat je s různými úhly náběhu a vstupními rychlostmi.
-2. Pro každou kombinaci postavit OpenFOAM případ s C-grid sítí (`blockMesh`).
-3. Spustit CFD simulace (`simpleFoam`) a extrahovat výsledná pole **p**, **U**.
-4. Interpolovat pole na pravidelnou mřížku a uložit je jako `.npz` dataset.
-5. Natrénovat **U-Net surrogate model** (případně s fyzikálními ztrátami) na tomto datasetu.
+1. Pole p, Ux, Uy z regularni mrizky (simple_unet, rans_pinn)
+2. Skalarni koeficienty Cl, Cd z OpenFOAM forceCoeffs (clcd_mlp)
 
----
+Obe vetve sdileji stejnou CFD pripravu pripadu, lisí se jen datovou reprezentaci, modelem a evaluaci.
 
-## Workflow – krok za krokem
+## Hlavni workflow
 
-Pipeline se skládá ze čtyř hlavních kroků. Každý má vlastní spouštěcí skript.
-
-### 1. Sestavení OpenFOAM případů
+### 1. Sestaveni OpenFOAM pripadu
 
 ```bash
 python -m scripts.build_blockmesh_cases
 ```
 
-- Pokud neexistuje, vygeneruje vzorkovací tabulku (`geometry/generated_profiles/airfoil_sampling_table.csv`) se všemi kombinacemi NACA profilů × AoA × rychlostí.
-- Pro každý řádek tabulky vytvoří adresář případu z šablony `templates/openfoam_base_case_yPlus1/`.
-- Vygeneruje case-specifický `blockMeshDict` (C-grid topologie) a aktualizuje `0/U` a `system/forceCoeffs`.
-- Výstup: adresáře případů v `run/airfoil_surrogate_cases/blockmesh_cases/`.
+- Vygeneruje nebo nacte sampling table.
+- Vytvori case adresare z OpenFOAM sablony.
+- Vygeneruje blockMeshDict a upravi 0/U a system/forceCoeffs.
 
-**Klíčová konfigurace:** `configs/dataset_config.yaml`, `configs/paths.yaml`
-
----
-
-### 2. Spuštění CFD simulací
-
-> Spouštět v terminálu OpenFOAM (Cygwin/WSL), z kořene projektu:
+### 2. Spusteni CFD
 
 ```bash
 python -m scripts.run_cases
 ```
 
-- Spustí celý CFD řetězec pro každý případ: `blockMesh` → `checkMesh` → `decomposePar` → `simpleFoam -parallel` → `reconstructPar`.
-- Případy běží paralelně (konfigurovatelný počet workers).
-- Výsledky a statusy zapisuje do `run_status.csv`.
-- Po skončení maže dočasné adresáře `processor*/`.
+- Spousti retezec blockMesh -> checkMesh -> decomposePar -> simpleFoam -parallel -> reconstructPar.
+- Uklada logy a run_status.csv.
 
-**Klíčová konfigurace:** `configs/solver_config.yaml`, `configs/paths.yaml`
-
----
-
-### 3. Extrakce proudových polí
+### 3. Extrakce flow fields (pro vetev p/U)
 
 ```bash
 python -m scripts.extract_flow_fields
 ```
 
-- Pro každý dokončený případ spustí `foamToVTK` a načte výsledná VTK data.
-- Interpoluje pole **p** a **U** na pravidelnou mřížku 640 × 320 bodů (rozsah x ∈ [−0.75, 1.75], y ∈ [−0.75, 0.75]).
-- Vytvoří masku profilu (body uvnitř tělesa → `fluid_mask = 0`).
-- Uloží komprimovaný `.npz` soubor na případ + souhrnný index `flow_dataset_index.csv`.
+- Spousti foamToVTK.
+- Interpoluje p a U na regularni mrizku.
+- Uklada NPZ dataset pro spatial modely.
 
-**Klíčová konfigurace:** `configs/paths.yaml`
-
----
-
-### 4. Trénování surrogate modelu
+### 4. Trenovani modelu
 
 ```bash
 python -m scripts.train_ml_model
 ```
 
-- Načte `.npz` dataset, rozdělí na trénovací a validační sadu.
-- Trénuje **SimpleUNet** (nebo fyzikálně informovanou CNN) – model predikuje 2D pole p, Ux, Uy z podmínek proudění.
-- Ztráta je masked MSE počítaná pouze nad tekutinovou doménou (mimo těleso profilu).
-- Uloží váhy modelu a vykresli křivky trénování.
+Podle model.name v configs/ml_models_config.yaml:
 
-**Klíčová konfigurace:** `configs/ml_models_config.yaml`, `configs/paths.yaml`
+- simple_unet nebo rans_pinn: trenink nad NPZ flow-fields.
+- clcd_mlp: trenink nad scalar features -> [Cl, Cd] z forceCoeffs.dat.
 
----
+U clcd_mlp je workflow robustni proti nekvalitnim CFD vystupum:
 
-## Pomocné skripty
+- parsuji se pouze finite hodnoty (Time, Cd, Cl),
+- vyzaduje se minimalni pocet validnich iteraci,
+- nevalidni pripady se skipuji se zaznamenanym duvodem,
+- normalizace i loss jsou kontrolovany proti NaN/Inf,
+- checkpoint se neuklada pri nevalidni historii loss.
+
+### 5. Evaluace modelu
+
+#### Evaluace spatial modelu (beze zmen)
+
+```bash
+python -m scripts.evaluate_ml_model
+```
+
+- Pro simple_unet a rans_pinn.
+- Per-case a global metriky pro pole p/U.
+- Pole a velocity diagnosticke obrazky.
+
+#### Evaluace scalar Cl/Cd modelu (nova paralelni vetev)
+
+```bash
+python -m scripts.evaluate_clcd_model
+```
+
+- Pouziva checkpoint normalizaci (nerekonstruuje statistiky).
+- Preferuje val_case_ids z checkpointu, fallback na val_indices, az pak rebuild splitu.
+- Uklada:
+	- data/models/clcd_mlp_validation/metrics/validation_metrics_per_case.csv
+	- data/models/clcd_mlp_validation/metrics/validation_summary.json
+	- data/models/clcd_mlp_validation/figures/cl_scatter.png
+	- data/models/clcd_mlp_validation/figures/cd_scatter.png
+	- data/models/clcd_mlp_validation/figures/cl_residual.png
+	- data/models/clcd_mlp_validation/figures/cd_residual.png
+	- data/models/clcd_mlp_validation/figures/cl_errors.png
+	- data/models/clcd_mlp_validation/figures/cd_errors.png
+
+## Modely
+
+- simple_unet: baseline surrogate pro p/U pole.
+- rans_pinn: CNN s fyzikalnim residual loss.
+- clcd_mlp: MLP pro regresi [Cl, Cd] z feature vectoru:
+	[camber_percent, camber_position_tenths, thickness_percent, aoa_deg, inlet_velocity].
+
+Checkpoint clcd_mlp uklada model_state_dict + normalizaci + poradi feature/target + train/val split metadata.
+
+## Pomocne skripty
 
 | Skript | Popis |
 |---|---|
-| `scripts/inspect_flow_npz.py` | Zobrazí obsah a statistiky jednoho `.npz` souboru s extrahovanými poli |
-| `scripts/plot_residuals.py` | Vykreslí konvergenční residuály z logů OpenFOAM simulace |
-
----
-
-## Struktura projektu
-
-```
-configs/            # YAML konfigurace (cesty, sampling, solver, ML)
-docs/               # Detailní dokumentace jednotlivých částí
-geometry/           # Vygenerovaná vzorkovací tabulka profilů
-run/                # Adresáře OpenFOAM případů
-scripts/            # Hlavní spouštěcí skripty pipeline
-src/                # Python balíček (generátory, buildery, extraktory, ML moduly)
-templates/          # Šablony OpenFOAM případů
-```
-
-### Hlavní moduly (`src/`)
-
-| Modul | Funkce |
-|---|---|
-| `config.py` | Načítání YAML konfigurací do typed dataclasses |
-| `generate_sampling_table.py` | Generování CSV tabulky kombinací profilů a podmínek |
-| `sampling.py` | Čtení CSV tabulky do typovaných `BuildCaseRow` záznamů |
-| `case_builder.py` | Stavba adresářů případů ze šablony |
-| `blockmesh_generator.py` | Procedurální generátor C-grid `blockMeshDict` pro NACA profily |
-| `file_editors.py` | Pomocné editory OpenFOAM souborů (`0/U`, `forceCoeffs`) |
-| `case_runner.py` | Spouštění OpenFOAM příkazů, logování, čištění |
-| `flow_extractor.py` | VTK export, interpolace na pravidelnou mřížku, uložení `.npz` |
-| `ml_dataset.py` | PyTorch dataset pro načítání `.npz` souborů |
-| `ml_models.py` | Architektury modelů (`SimpleUNet`, fyzikálně informovaná CNN) |
-| `ml_training.py` | Trénovací smyčka, masked MSE ztráta |
-| `ml_validation.py` | Vykreslování trénovacích křivek |
-
----
+| scripts/inspect_flow_npz.py | Kontrola obsahu NPZ souboru |
+| scripts/plot_residuals.py | Vykresleni OpenFOAM residuals |
+| scripts/evaluate_ml_model.py | Evaluace spatial modelu (p/U) |
+| scripts/evaluate_clcd_model.py | Evaluace scalar Cl/Cd modelu |
 
 ## Konfigurace
 
-Všechna nastavení jsou řízena YAML soubory v `configs/`:
+- configs/paths.yaml
+- configs/dataset_config.yaml
+- configs/solver_config.yaml
+- configs/ml_models_config.yaml
 
-- `paths.yaml` – absolutní cesty k adresářům projektu a výstupům
-- `dataset_config.yaml` – parametry vzorkování (profily, AoA, rychlosti) a parametry sítě `blockMesh`
-- `solver_config.yaml` – OpenFOAM příkazy, paralelizace, počet workerů
-- `ml_models_config.yaml` – volba modelu, hyperparametry, výstupní soubory
+## Dokumentace
 
----
+Detailni technicky popis je v docs:
 
-## Technologie
-
-- **CFD:** OpenFOAM (`simpleFoam`, `blockMesh`, `foamToVTK`)
-- **Python:** numpy, scipy, vtk, PyTorch, PyYAML
-- **ML:** U-Net surrogate model s volitelnou RANS fyzikální ztrátou
-
-
-## TO DO
-- automatická validace CFD výsledných polí
-- automatické vyloučení podezřelých případů
-- rozšíření základního datasetu (po přidání automatické validace)
-- kalibrace ML modelů na 100 pct fyzikálně čistých datech
+- docs/base_overview.md
+- docs/pipeline.md
+- docs/cfd.md
+- docs/mesh.md
+- docs/ml_model.md
+- docs/project_plan.md

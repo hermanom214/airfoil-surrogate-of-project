@@ -7,7 +7,7 @@ The active project flow is a blockMesh-only workflow:
 - OpenFOAM case build with generated `blockMeshDict`,
 - CFD run,
 - flow-field extraction to NPZ,
-- ML training.
+- ML training and evaluation.
 
 The legacy STL/snappyHexMesh branch is not part of the current pipeline.
 
@@ -22,6 +22,8 @@ flowchart LR
     E --> F["scripts/extract_flow_fields.py"]
     F --> G["data/flow_fields/*.npz"]
     G --> H["scripts/train_ml_model.py"]
+    H --> K["scripts/evaluate_ml_model.py\n(spatial branch)"]
+    H --> L["scripts/evaluate_clcd_model.py\n(scalar branch)"]
 
     I["configs/solver_config.yaml"] --> D
     I --> F
@@ -85,6 +87,32 @@ Current extraction grid in the script:
 The training script is config-driven for model selection, model parameters,
 optimizer settings, training split, physics-loss settings, and output naming.
 
+Two ML branches are supported:
+
+1. Spatial branch (`simple_unet`, `rans_pinn`):
+  - trains from NPZ flow fields,
+  - predicts `(p, Ux, Uy)` maps,
+  - evaluated by [scripts/evaluate_ml_model.py](../scripts/evaluate_ml_model.py).
+
+2. Scalar branch (`clcd_mlp`):
+  - trains from robustly parsed OpenFOAM `forceCoeffs.dat`,
+  - predicts `[Cl, Cd]`,
+  - evaluated by [scripts/evaluate_clcd_model.py](../scripts/evaluate_clcd_model.py).
+
+During scalar training, invalid CFD outputs are filtered out (finite-value checks,
+minimum valid iterations, safe normalization checks, non-finite loss guards).
+
+Checkpoint for scalar branch stores:
+- `model_name`
+- `model_state_dict`
+- `feature_mean`, `feature_std`
+- `target_mean`, `target_std`
+- `feature_order`, `target_order`
+- `train_indices`, `val_indices`
+
+Evaluation prefers split metadata from checkpoint (`val_case_ids` first, then `val_indices`),
+and only rebuilds split from seed as last fallback.
+
 ## Shared modules
 
 | Module | Purpose |
@@ -96,6 +124,10 @@ optimizer settings, training split, physics-loss settings, and output naming.
 | [src/file_editors.py](../src/file_editors.py) | updating `0/U` and `system/forceCoeffs` |
 | [src/case_runner.py](../src/case_runner.py) | OpenFOAM command execution, logs, run statuses, processor cleanup |
 | [src/flow_extractor.py](../src/flow_extractor.py) | VTK loading, interpolation, mask generation, NPZ export |
+| [src/ml_clcd_dataset.py](../src/ml_clcd_dataset.py) | robust Cl/Cd dataset from forceCoeffs |
+| [src/clcd_inference.py](../src/clcd_inference.py) | reusable scalar inference API |
+| [src/evaluate_clcd_metrics.py](../src/evaluate_clcd_metrics.py) | scalar per-case/global metrics |
+| [src/evaluate_clcd_plotting.py](../src/evaluate_clcd_plotting.py) | scalar evaluation plots |
 
 ## Quick Start
 
@@ -104,6 +136,8 @@ python -m scripts.build_blockmesh_cases
 python -m scripts.run_cases
 python -m scripts.extract_flow_fields
 python -m scripts.train_ml_model
+python -m scripts.evaluate_ml_model
+python -m scripts.evaluate_clcd_model
 ```
 
 ## Configuration files

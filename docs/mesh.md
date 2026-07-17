@@ -41,6 +41,10 @@ Per-case changing inputs (from `sampling`):
 - `aoa_deg`
 - `inlet_velocity` (used in `0/U` and `forceCoeffs`, not in mesh topology)
 
+Note:
+- `system/forceCoeffs` is updated per case not only for CFD postprocessing,
+  but also as a direct source for the scalar Cl/Cd ML branch (`clcd_mlp`).
+
 Current active sampling ranges in [configs/dataset_config.yaml](../configs/dataset_config.yaml):
 - `camber_values`: `0, 2, 4`
 - `camber_position_values`: `2, 4` (for `camber=0` the code is forced to symmetric `00xx`)
@@ -102,6 +106,11 @@ Each built case contains:
 - updated `0/U`
 - updated `system/forceCoeffs`
 - `params.json` metadata
+
+This makes each case immediately compatible with both downstream branches:
+
+- spatial branch: extraction to NPZ (`p`, `U`, mask)
+- scalar branch: robust parsing of `forceCoeffs.dat` for Cl/Cd targets
 
 ## Sampling table dependency
 
