@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-AVAILABLE_MODELS = ("simple_unet", "rans_pinn")
+AVAILABLE_MODELS = ("simple_unet", "rans_pinn", "clcd_mlp")
 
 
 class SimpleUNet(nn.Module):
@@ -302,17 +302,54 @@ class PhysicsInformedCNN(nn.Module):
         }
 
 
-def build_model(model_name: str, **kwargs) -> nn.Module:
-    """Factory for selecting a model architecture from AVAILABLE_MODELS.
+class ClCdMLP(nn.Module):
+    """MLP regressor for aerodynamic coefficients [Cl, Cd]."""
 
-    All supported models output channels in order [p, Ux, Uy].
-    """
+    def __init__(
+        self,
+        input_dim: int = 5,
+        hidden_dims: tuple[int, ...] | list[int] = (64, 64),
+        output_dim: int = 2,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+
+        if input_dim <= 0:
+            raise ValueError("input_dim must be > 0")
+        if output_dim <= 0:
+            raise ValueError("output_dim must be > 0")
+        if len(hidden_dims) == 0:
+            raise ValueError("hidden_dims must contain at least one layer size")
+        if any(int(v) <= 0 for v in hidden_dims):
+            raise ValueError("All hidden layer sizes must be > 0")
+        if not (0.0 <= float(dropout) < 1.0):
+            raise ValueError("dropout must be in range [0, 1)")
+
+        dims = [int(input_dim), *[int(v) for v in hidden_dims], int(output_dim)]
+        layers: list[nn.Module] = []
+        for idx in range(len(dims) - 2):
+            layers.append(nn.Linear(dims[idx], dims[idx + 1]))
+            layers.append(nn.ReLU(inplace=True))
+            if dropout > 0.0:
+                layers.append(nn.Dropout(p=float(dropout)))
+        layers.append(nn.Linear(dims[-2], dims[-1]))
+
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+def build_model(model_name: str, **kwargs) -> nn.Module:
+    """Factory for selecting a model architecture from AVAILABLE_MODELS."""
 
     key = model_name.lower().strip()
     if key == "simple_unet":
         return SimpleUNet(**kwargs)
     if key == "rans_pinn":
         return PhysicsInformedCNN(**kwargs)
+    if key == "clcd_mlp":
+        return ClCdMLP(**kwargs)
 
     raise ValueError(
         f"Unsupported model '{model_name}'. Supported models: {', '.join(AVAILABLE_MODELS)}"

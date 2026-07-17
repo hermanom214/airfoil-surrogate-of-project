@@ -112,9 +112,21 @@ class RansPinnModelParamsConfig:
 
 
 @dataclass
+class ClCdMlpModelParamsConfig:
+    input_dim: int
+    hidden_dims: list[int]
+    output_dim: int
+    dropout: float
+    cases_subdir: str
+    force_coeffs_relpath: str
+    tail_window: int
+
+
+@dataclass
 class MLModelParamsConfig:
     simple_unet: SimpleUNetModelParamsConfig
     rans_pinn: RansPinnModelParamsConfig
+    clcd_mlp: ClCdMlpModelParamsConfig
 
 
 @dataclass
@@ -294,6 +306,15 @@ def load_ml_models_config(config_path: Path) -> MLModelsConfig:
                 out_channels=int(model_data["params"]["rans_pinn"]["out_channels"]),
                 hidden_channels=int(model_data["params"]["rans_pinn"]["hidden_channels"]),
                 depth=int(model_data["params"]["rans_pinn"]["depth"]),
+            ),
+            clcd_mlp=ClCdMlpModelParamsConfig(
+                input_dim=int(model_data["params"]["clcd_mlp"]["input_dim"]),
+                hidden_dims=[int(v) for v in model_data["params"]["clcd_mlp"]["hidden_dims"]],
+                output_dim=int(model_data["params"]["clcd_mlp"]["output_dim"]),
+                dropout=float(model_data["params"]["clcd_mlp"]["dropout"]),
+                cases_subdir=str(model_data["params"]["clcd_mlp"]["cases_subdir"]),
+                force_coeffs_relpath=str(model_data["params"]["clcd_mlp"]["force_coeffs_relpath"]),
+                tail_window=int(model_data["params"]["clcd_mlp"]["tail_window"]),
             ),
         ),
     )
