@@ -10,7 +10,7 @@ sys.path.append(str(PROJECT_ROOT))
 
 from src.config import load_paths
 from src.flow_extractor import (
-    discover_case_dirs,
+    discover_flow_case_dirs,
     extract_single_case,
     write_flow_index,
 )
@@ -29,11 +29,11 @@ def main() -> None:
     config_path = PROJECT_ROOT / "configs" / "paths.yaml"
     paths = load_paths(config_path)
 
-    cases_root = paths.openfoam_case_sim / "blockmesh_cases"
+    cases_root = paths.flow_fields_output
     output_root = paths.flow_fields_output
     index_csv = output_root / "flow_dataset_index.csv"
 
-    case_dirs = discover_case_dirs(cases_root)
+    case_dirs = discover_flow_case_dirs(cases_root)
 
     if not case_dirs:
         print(f"[INFO] Nebyly nalezeny žádné case složky v: {cases_root}")

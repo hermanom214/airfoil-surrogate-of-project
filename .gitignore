@@ -34,3 +34,12 @@ configs/paths.yaml
 
 # BACKUP folder
 BACKUP*
+
+#NPZ files
+*.npz
+
+#DATA
+data/
+
+#TESTS
+tests/

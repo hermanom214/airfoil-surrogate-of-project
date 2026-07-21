@@ -2,7 +2,6 @@
 Flow-field extraction utilities for the blockMesh OpenFOAM workflow.
 
 Module responsibilities:
-- run `foamToVTK` for a solved case,
 - load pressure/velocity fields from VTK,
 - interpolate fields to a regular 2D grid,
 - build a fluid mask from NACA geometry,
@@ -22,14 +21,7 @@ from scipy.interpolate import griddata
 from shapely.affinity import rotate as shapely_rotate
 from shapely.geometry import Point, Polygon
 
-from src.case_runner import run_command, discover_case_dirs
-from src.config import load_solver_config
 from src.inspect_plausibility import evaluate_plausibility
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SOLVER_CONFIG_PATH = PROJECT_ROOT / "configs" / "solver_config.yaml"
-SOLVER_CFG = load_solver_config(SOLVER_CONFIG_PATH)
 
 
 @dataclass
@@ -41,6 +33,25 @@ class FlowExtractionResult:
     nx: int
     ny: int
     latest_time: str
+
+
+def discover_flow_case_dirs(cases_root: Path) -> list[Path]:
+    """Find archived case folders prepared in data/flow_fields."""
+    if not cases_root.exists():
+        return []
+
+    case_dirs: list[Path] = []
+
+    for path in sorted(cases_root.iterdir()):
+        if not path.is_dir():
+            continue
+
+        has_vtk = (path / "VTK").is_dir()
+        has_system = (path / "system").is_dir()
+        if has_vtk and has_system:
+            case_dirs.append(path)
+
+    return case_dirs
 
 
 def read_vtk_with_pyvista(vtk_file: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -90,18 +101,6 @@ def find_latest_time_dir(case_dir: Path) -> str:
         raise RuntimeError(f"No OpenFOAM time directories found in {case_dir}")
 
     return sorted(time_dirs, key=lambda x: x[0])[-1][1]
-
-
-def run_foam_to_vtk(case_dir: Path) -> int:
-    """Run foamToVTK for latest time and return process return code."""
-    result = run_command(
-        command=SOLVER_CFG.foam_to_vtk.command,
-        case_dir=case_dir,
-        log_dir=case_dir / "logs",
-        log_name=SOLVER_CFG.foam_to_vtk.log_name,
-    )
-
-    return result.returncode
 
 
 def find_vtk_file(case_dir: Path) -> Path:
@@ -168,18 +167,17 @@ def extract_single_case(
     case_id = case_dir.name
     output_root.mkdir(parents=True, exist_ok=True)
 
-    latest_time = find_latest_time_dir(case_dir)
-
-    returncode = run_foam_to_vtk(case_dir)
-    if returncode != 0:
+    try:
+        latest_time = find_latest_time_dir(case_dir)
+    except RuntimeError as e:
         return FlowExtractionResult(
             case_id=case_id,
             case_path=str(case_dir),
-            status=f"foamToVTK_failed({returncode})",
+            status=f"missing_latest_time({e})",
             output_file="",
             nx=nx,
             ny=ny,
-            latest_time=latest_time,
+            latest_time="",
         )
 
     vtk_file = find_vtk_file(case_dir)
@@ -199,10 +197,29 @@ def extract_single_case(
     )
     
     params_path = case_dir / "params.json"
-    params = {}
+    if not params_path.exists():
+        return FlowExtractionResult(
+            case_id=case_id,
+            case_path=str(case_dir),
+            status="missing_params_json",
+            output_file="",
+            nx=nx,
+            ny=ny,
+            latest_time=latest_time,
+        )
 
-    if params_path.exists():
-        params = json.loads(params_path.read_text(encoding="utf-8"))
+    params = json.loads(params_path.read_text(encoding="utf-8"))
+
+    if "naca_code" not in params:
+        return FlowExtractionResult(
+            case_id=case_id,
+            case_path=str(case_dir),
+            status="missing_naca_code",
+            output_file="",
+            nx=nx,
+            ny=ny,
+            latest_time=latest_time,
+        )
 
     naca_code = str(params["naca_code"])
     chord = float(params.get("chord", 1.0))
@@ -228,7 +245,7 @@ def extract_single_case(
         p=p_grid,
         u=U_grid,
         fluid_mask=fluid_mask,
-        case_name=f"{case_id}_flow.npz",
+        case_name=f"{case_id}.npz",
     )
     if plausibility.plausibility != "OK":
         return FlowExtractionResult(
@@ -241,7 +258,9 @@ def extract_single_case(
             latest_time=latest_time,
         )
 
-    output_file = output_root / f"{case_id}_flow.npz"
+    case_output_dir = output_root / case_id
+    case_output_dir.mkdir(parents=True, exist_ok=True)
+    output_file = case_output_dir / f"{case_id}.npz"
 
     np.savez_compressed(
         output_file,

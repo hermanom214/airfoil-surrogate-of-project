@@ -19,6 +19,7 @@ SOLVER_CFG = load_solver_config(SOLVER_CONFIG_PATH)
 OF_BASH = str(PATHS.openfoam_bash)
 N_PROCS = SOLVER_CFG.case_runner.n_procs
 REQUIRED_CASE_SUBDIRS = tuple(SOLVER_CFG.case_runner.required_case_subdirs)
+FLOW_FIELDS_OUTPUT = PATHS.flow_fields_output
 
 SIMPLEFOAM_MAX_LINEAR_ITERS = 1000
 SIMPLEFOAM_RESIDUAL_STOP_THRESHOLD = 1e2
@@ -53,6 +54,9 @@ class CaseRunResult:
     blockmesh_status: str
     checkmesh_status: str
     simplefoam_status: str
+    foamtovtk_status: str
+    archive_status: str
+    cleanup_case_status: str
     overall_status: str
     runtime_sec: float
 
@@ -229,6 +233,67 @@ def cleanup_processor_dirs(case_dir: Path) -> int:
     return removed
 
 
+def _safe_copytree(src: Path, dst: Path) -> None:
+    if not src.exists() or not src.is_dir():
+        raise RuntimeError(f"missing directory: {src}")
+    shutil.copytree(src, dst)
+
+
+def archive_case_outputs(case_dir: Path, flow_fields_root: Path) -> tuple[bool, str]:
+    """Copy selected case artifacts into data/flow_fields/<case_id>."""
+    case_id = case_dir.name
+    target_case_dir = flow_fields_root / case_id
+
+    if target_case_dir.exists():
+        return False, f"target_exists({target_case_dir})"
+
+    required_dirs = ["logs", "postProcessing", "system", "VTK"]
+    optional_files = ["params.json"]
+
+    try:
+        target_case_dir.mkdir(parents=True, exist_ok=False)
+
+        for directory_name in required_dirs:
+            src = case_dir / directory_name
+            dst = target_case_dir / directory_name
+            _safe_copytree(src, dst)
+
+        for file_name in optional_files:
+            src_file = case_dir / file_name
+            if src_file.is_file():
+                shutil.copy2(src_file, target_case_dir / file_name)
+
+        latest_time_name = find_latest_numeric_time(case_dir)
+        latest_time_src = case_dir / latest_time_name
+        latest_time_dst = target_case_dir / latest_time_name
+        _safe_copytree(latest_time_src, latest_time_dst)
+
+    except Exception as e:
+        if target_case_dir.exists():
+            shutil.rmtree(target_case_dir, ignore_errors=True)
+        return False, f"copy_failed({e})"
+
+    return True, "ok"
+
+
+def find_latest_numeric_time(case_dir: Path) -> str:
+    """Return latest numeric OpenFOAM time directory name."""
+    time_dirs: list[tuple[float, str]] = []
+    for path in case_dir.iterdir():
+        if not path.is_dir():
+            continue
+        try:
+            numeric_time = float(path.name)
+        except ValueError:
+            continue
+        time_dirs.append((numeric_time, path.name))
+
+    if not time_dirs:
+        raise RuntimeError(f"No numeric time directory found in {case_dir}")
+
+    return sorted(time_dirs, key=lambda item: item[0])[-1][1]
+
+
 def run_single_case(case_dir: Path) -> CaseRunResult:
     """
     Runs the full CFD chain for one case.
@@ -243,6 +308,9 @@ def run_single_case(case_dir: Path) -> CaseRunResult:
         "blockmesh_status": "not_run",
         "checkmesh_status": "not_run",
         "simplefoam_status": "not_run",
+        "foamtovtk_status": "not_run",
+        "archive_status": "not_run",
+        "cleanup_case_status": "not_run",
     }
 
     for step in SOLVER_CFG.case_runner.run_steps:
@@ -274,15 +342,87 @@ def run_single_case(case_dir: Path) -> CaseRunResult:
                 blockmesh_status=statuses["blockmesh_status"],
                 checkmesh_status=statuses["checkmesh_status"],
                 simplefoam_status=statuses["simplefoam_status"],
+                foamtovtk_status=statuses["foamtovtk_status"],
+                archive_status=statuses["archive_status"],
+                cleanup_case_status=statuses["cleanup_case_status"],
                 overall_status="nOK" if result.abort_reason is not None else "failed",
                 runtime_sec=round(runtime_sec, 3),
             )
 
-    runtime_sec = time.perf_counter() - overall_start
+    foam_to_vtk_result = run_command(
+        command=SOLVER_CFG.foam_to_vtk.command,
+        case_dir=case_dir,
+        log_dir=log_dir,
+        log_name=SOLVER_CFG.foam_to_vtk.log_name,
+    )
 
-    removed_count = cleanup_processor_dirs(case_dir)
-    if removed_count:
-        print(f"[CLEANUP] {case_id}: odstraněno {removed_count}x processor* složka")
+    if foam_to_vtk_result.ok:
+        statuses["foamtovtk_status"] = "ok"
+    else:
+        statuses["foamtovtk_status"] = f"failed({foam_to_vtk_result.returncode})"
+        runtime_sec = time.perf_counter() - overall_start
+        print(
+            f"[WARN] {case_id}: foamToVTK failed, case kept for inspection "
+            f"at {case_dir}"
+        )
+        return CaseRunResult(
+            case_id=case_id,
+            case_path=str(case_dir),
+            blockmesh_status=statuses["blockmesh_status"],
+            checkmesh_status=statuses["checkmesh_status"],
+            simplefoam_status=statuses["simplefoam_status"],
+            foamtovtk_status=statuses["foamtovtk_status"],
+            archive_status=statuses["archive_status"],
+            cleanup_case_status=statuses["cleanup_case_status"],
+            overall_status="failed",
+            runtime_sec=round(runtime_sec, 3),
+        )
+
+    archived, archive_status = archive_case_outputs(case_dir, FLOW_FIELDS_OUTPUT)
+    statuses["archive_status"] = archive_status
+    if not archived:
+        runtime_sec = time.perf_counter() - overall_start
+        print(
+            f"[WARN] {case_id}: archive failed ({archive_status}), "
+            f"case kept for inspection at {case_dir}"
+        )
+        return CaseRunResult(
+            case_id=case_id,
+            case_path=str(case_dir),
+            blockmesh_status=statuses["blockmesh_status"],
+            checkmesh_status=statuses["checkmesh_status"],
+            simplefoam_status=statuses["simplefoam_status"],
+            foamtovtk_status=statuses["foamtovtk_status"],
+            archive_status=statuses["archive_status"],
+            cleanup_case_status=statuses["cleanup_case_status"],
+            overall_status="failed",
+            runtime_sec=round(runtime_sec, 3),
+        )
+
+    try:
+        shutil.rmtree(case_dir)
+        statuses["cleanup_case_status"] = "ok"
+    except OSError as e:
+        statuses["cleanup_case_status"] = f"failed({e})"
+        print(
+            f"[WARN] {case_id}: nepodařilo se smazat výpočetní složku "
+            f"{case_dir} ({e})"
+        )
+        runtime_sec = time.perf_counter() - overall_start
+        return CaseRunResult(
+            case_id=case_id,
+            case_path=str(case_dir),
+            blockmesh_status=statuses["blockmesh_status"],
+            checkmesh_status=statuses["checkmesh_status"],
+            simplefoam_status=statuses["simplefoam_status"],
+            foamtovtk_status=statuses["foamtovtk_status"],
+            archive_status=statuses["archive_status"],
+            cleanup_case_status=statuses["cleanup_case_status"],
+            overall_status="failed",
+            runtime_sec=round(runtime_sec, 3),
+        )
+
+    runtime_sec = time.perf_counter() - overall_start
 
     return CaseRunResult(
         case_id=case_id,
@@ -290,6 +430,9 @@ def run_single_case(case_dir: Path) -> CaseRunResult:
         blockmesh_status=statuses["blockmesh_status"],
         checkmesh_status=statuses["checkmesh_status"],
         simplefoam_status=statuses["simplefoam_status"],
+        foamtovtk_status=statuses["foamtovtk_status"],
+        archive_status=statuses["archive_status"],
+        cleanup_case_status=statuses["cleanup_case_status"],
         overall_status="ok",
         runtime_sec=round(runtime_sec, 3),
     )
@@ -308,6 +451,9 @@ def write_run_status_csv(results: Iterable[CaseRunResult], output_csv: Path) -> 
         "blockmesh_status",
         "checkmesh_status",
         "simplefoam_status",
+        "foamtovtk_status",
+        "archive_status",
+        "cleanup_case_status",
         "overall_status",
         "runtime_sec",
     ]
