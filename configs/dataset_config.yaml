@@ -3,11 +3,11 @@ blockmesh_cases_subdir: "blockmesh_cases"
 
 sampling:
   chord: 1.0
-  aoa_values: [-4.0, 0.0, 4.0]
-  inlet_velocity_values: [15.0, 20.0, 25.0]
-  camber_values: [0, 2, 4]
+  aoa_values: [-4.0, -2.0, 0.0, 2.0, 4.0]
+  inlet_velocity_values: [15.0, 17.5, 20.0, 22.5, 25.0]
+  camber_values: [0, 1, 2]
   camber_position_values: [2, 4]
-  thickness_values: [8, 12, 16]
+  thickness_values: [8, 10, 12, 14, 16]
 
 blockmesh:
   z_half: 0.05

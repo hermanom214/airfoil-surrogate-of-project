@@ -13,6 +13,20 @@ from src.generate_sampling_table import generate_sampling_table  # noqa: E402
 from src.sampling import load_sampling_table  # noqa: E402
 
 
+def remove_case_directories(root: Path) -> int:
+    """Remove all case directories directly below a managed output root."""
+    if not root.exists():
+        return 0
+
+    removed = 0
+    for child in root.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child)
+            removed += 1
+
+    return removed
+
+
 def main() -> None:
     """
     Build blockMesh-based OpenFOAM cases from the sampling table.
@@ -32,12 +46,9 @@ def main() -> None:
     geometry_root.mkdir(parents=True, exist_ok=True)
     paths.generated_profiles.mkdir(parents=True, exist_ok=True)
 
-    # Auto-generate sampling table if it does not exist yet.
-    if not paths.sampling_table.exists():
-        n = generate_sampling_table(paths.sampling_table, dataset_cfg.sampling)
-        print(f"[INFO] Generated sampling table: {paths.sampling_table} ({n} rows)")
-    else:
-        print(f"[INFO] Using existing sampling table: {paths.sampling_table}")
+    # Always regenerate the sampling table from the current dataset config.
+    n = generate_sampling_table(paths.sampling_table, dataset_cfg.sampling)
+    print(f"[INFO] Regenerated sampling table: {paths.sampling_table} ({n} rows)")
 
     rows = load_sampling_table(paths.sampling_table)
 
@@ -46,6 +57,10 @@ def main() -> None:
     blockmesh_case_sim_root = paths.openfoam_case_sim / dataset_cfg.blockmesh_cases_subdir
 
     blockmesh_run_root.mkdir(parents=True, exist_ok=True)
+    blockmesh_case_sim_root.mkdir(parents=True, exist_ok=True)
+
+    removed_run = remove_case_directories(blockmesh_run_root)
+    print(f"[INFO] Removed old run case directories: {removed_run}")
 
     print(f"Template case: {template_case}")
     print(f"Sampling table: {paths.sampling_table}")
@@ -67,7 +82,8 @@ def main() -> None:
         print(f"Built blockMesh case: {case_dir.name}")
 
     print("\nCopying blockMesh cases to OpenFOAM simulation directory...")
-    blockmesh_case_sim_root.mkdir(parents=True, exist_ok=True)
+    removed_sim = remove_case_directories(blockmesh_case_sim_root)
+    print(f"[INFO] Removed old simulation case directories: {removed_sim}")
 
     for case_dir in built_cases:
         target_dir = blockmesh_case_sim_root / case_dir.name
