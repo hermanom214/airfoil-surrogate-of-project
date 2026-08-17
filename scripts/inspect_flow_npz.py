@@ -162,9 +162,9 @@ def main() -> None:
         else data_dir.parent / PLAUSIBILITY_CSV_NAME
     )
 
-    files = sorted(data_dir.glob("*_flow.npz"))
+    files = sorted(data_dir.glob("*/*.npz"))
     if not files:
-        raise RuntimeError(f"No *_flow.npz files found in {data_dir}")
+        raise RuntimeError(f"No flow-field .npz files found in case directories under {data_dir}")
 
     print(f"[INFO] Scanning directory: {data_dir}")
     print(f"[INFO] Found files: {len(files)}")
@@ -257,7 +257,11 @@ def main() -> None:
 
     # Print detailed stats for one representative valid file.
     representative = ok_results[0]
-    representative_path = data_dir / str(representative["filename"])
+    representative_path = next(
+        file_path
+        for file_path in files
+        if file_path.name == str(representative["filename"])
+    )
     with np.load(representative_path, allow_pickle=True) as data:
         print(f"\n[REPRESENTATIVE FILE] {representative_path.name}")
         print_stats("Pressure p", data["p"])
