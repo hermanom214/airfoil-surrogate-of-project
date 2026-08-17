@@ -1,5 +1,5 @@
 model:
-  name: "clcd_mlp" # možnosti: "simple_unet" | "rans_pinn" | "clcd_mlp"
+  name: "simple_unet" # možnosti: "simple_unet" | "rans_pinn" | "clcd_mlp"
   params:
     simple_unet:
       in_channels: 5 # obvykle 5; měň jen pokud změníš vstupní featury datasetu
@@ -16,7 +16,7 @@ model:
       hidden_dims: [64, 64] # rozumně [32,32] až [256,256,128]
       output_dim: 2 # [Cl, Cd]
       dropout: 0.0 # rozumně 0.0–0.3
-      cases_subdir: "blockmesh_cases" # relativně k paths.openfoam_case_sim
+      cases_subdir: "." # relativně k paths.flow_fields_output
       force_coeffs_relpath: "postProcessing/forceCoeffs1/0/forceCoeffs.dat"
       tail_window: 200 # průměr Cl/Cd z posledních N iterací
 

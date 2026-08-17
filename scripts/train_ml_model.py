@@ -51,19 +51,15 @@ CLCD_FEATURE_ORDER = [
 CLCD_TARGET_ORDER = ["Cl", "Cd"]
 
 
-def _load_reference_grid_spacing(data_dir: Path) -> tuple[float, float]:
-    files = sorted(data_dir.glob("*/*.npz"))
-    if not files:
-        raise RuntimeError(f"No flow-field NPZ files found in case directories under {data_dir}")
-
-    with np.load(files[0], allow_pickle=False) as data:
+def _load_reference_grid_spacing(file_path: Path) -> tuple[float, float]:
+    with np.load(file_path, allow_pickle=False) as data:
         xy = torch.from_numpy(data["xy"].astype(np.float32))
     return compute_grid_spacing_from_xy(xy)
 
 
 def _train_clcd_mlp(device: str) -> None:
     clcd_cfg = ML_CFG.model.params.clcd_mlp
-    cases_root = PATHS.openfoam_case_sim / clcd_cfg.cases_subdir
+    cases_root = DATA_DIR / clcd_cfg.cases_subdir
     dataset = AirfoilClCdDataset(
         cases_root=cases_root,
         tail_window=clcd_cfg.tail_window,
@@ -227,7 +223,7 @@ def main() -> None:
 
     # Load the full dataset of flow-field samples
     dataset = AirfoilFlowDataset(DATA_DIR)
-    dx, dy = _load_reference_grid_spacing(DATA_DIR)
+    dx, dy = _load_reference_grid_spacing(dataset.files[0])
     print(f"[INFO] Grid spacing | dx: {dx:.6e} | dy: {dy:.6e}")
 
     split = build_train_val_split(

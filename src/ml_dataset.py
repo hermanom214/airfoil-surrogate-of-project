@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import csv
 import re
 from pathlib import Path
 from typing import Sequence
@@ -14,6 +13,8 @@ from typing import Sequence
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+
+from src.ml_quality_filter import load_excluded_cases
 
 
 def parse_case_params(filename: str) -> tuple[float, float] | None:
@@ -44,18 +45,7 @@ class AirfoilFlowDataset(Dataset):
     def __init__(self, data_dir: Path):
         # Collect and sort all flow-field files in the given directory
         all_files = sorted(data_dir.glob("*/*.npz"))
-        inspection_csv = data_dir.parent / "pictures_inspect_flow" / "inspect_plausibility.csv"
-        excluded_cases: dict[str, str] = {}
-        if inspection_csv.is_file():
-            with inspection_csv.open("r", newline="", encoding="utf-8") as csv_file:
-                for row in csv.DictReader(csv_file):
-                    if row.get("overall_status") == "nOK":
-                        excluded_cases[row["case_name"]] = row.get("overall_reason", "")
-        else:
-            print(
-                "[WARN] Inspection CSV not found; no quality-based exclusions applied: "
-                f"{inspection_csv}"
-            )
+        excluded_cases = load_excluded_cases(data_dir)
         self.files: list[Path] = []
         self.sample_params: list[tuple[float, float]] = []
         self.aoa_mean = 0.0
