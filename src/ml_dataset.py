@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import csv
 import re
 from pathlib import Path
 from typing import Sequence
@@ -38,11 +39,23 @@ def parse_case_params(filename: str) -> tuple[float, float] | None:
 
 
 class AirfoilFlowDataset(Dataset):
-    """Dataset that loads all *_flow.npz files from a directory."""
+    """Dataset that loads inspected flow-field NPZ files from case directories."""
 
     def __init__(self, data_dir: Path):
         # Collect and sort all flow-field files in the given directory
-        all_files = sorted(data_dir.glob("*_flow.npz"))
+        all_files = sorted(data_dir.glob("*/*.npz"))
+        inspection_csv = data_dir.parent / "pictures_inspect_flow" / "inspect_plausibility.csv"
+        excluded_cases: dict[str, str] = {}
+        if inspection_csv.is_file():
+            with inspection_csv.open("r", newline="", encoding="utf-8") as csv_file:
+                for row in csv.DictReader(csv_file):
+                    if row.get("overall_status") == "nOK":
+                        excluded_cases[row["case_name"]] = row.get("overall_reason", "")
+        else:
+            print(
+                "[WARN] Inspection CSV not found; no quality-based exclusions applied: "
+                f"{inspection_csv}"
+            )
         self.files: list[Path] = []
         self.sample_params: list[tuple[float, float]] = []
         self.aoa_mean = 0.0
@@ -57,6 +70,12 @@ class AirfoilFlowDataset(Dataset):
         self.uy_std = 1.0
 
         for path in all_files:
+            if path.parent.name in excluded_cases:
+                print(
+                    f"[INFO] Excluding nOK case from dataset: {path.parent.name} | "
+                    f"{excluded_cases[path.parent.name]}"
+                )
+                continue
             params = parse_case_params(path.name)
             if params is None:
                 print(
@@ -68,12 +87,12 @@ class AirfoilFlowDataset(Dataset):
             self.sample_params.append(params)
 
         if not all_files:
-            raise RuntimeError(f"No *_flow.npz files found in {data_dir}")
+            raise RuntimeError(f"No flow-field NPZ files found in case directories under {data_dir}")
 
         if not self.files:
             raise RuntimeError(
-                "No valid *_flow.npz files left after filtering by filename "
-                f"parameters in {data_dir}"
+                "No valid flow-field NPZ files left after quality and filename filtering "
+                f"in {data_dir}"
             )
 
         # Default to stats computed on all available samples; caller can override

@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import csv
 import math
+import re
 import shutil
 import sys
 from pathlib import Path
 
-import matplotlib.pyplot as plt
+import matplotlib
 import numpy as np
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
@@ -15,13 +20,31 @@ from src.config import load_paths
 from src.inspect_plausibility import (
     PlausibilityResult,
     evaluate_plausibility,
-    write_plausibility_csv,
 )
 
 
 SAVE_FIGURES = True
 PICTURES_SUBDIR = Path("data") / "pictures_inspect_flow"
 PLAUSIBILITY_CSV_NAME = "inspect_plausibility.csv"
+RESIDUALS_SUBDIR = "residuals"
+RESIDUAL_FIELDS = ("Ux", "Uy", "p", "omega", "k")
+RESIDUAL_CHECK_FIELDS = ("Ux", "Uy", "p")
+RESIDUAL_LIMIT = 6.0e-3
+RESIDUAL_STRONG_GROWTH_FACTOR = 2.0
+FIELD_UX_MIN = -20.0
+FIELD_UX_MAX = 40.0
+FIELD_P_MIN = -1000.0
+FIELD_P_MAX = 500.0
+MANUALLY_EXCLUDED_CASES = {
+    "case_0354_naca1416_aoam4p0_u22p5": "visually_invalid_flow_field",
+    "case_0610_naca2416_aoam2p0_u25p0": "visually_invalid_flow_field",
+}
+
+RESIDUAL_RE = re.compile(
+    r"Solving for (Ux|Uy|p|omega|k),\s+Initial residual =\s*"
+    r"([0-9.eE+\-]+)"
+)
+TIME_RE = re.compile(r"^Time\s*=\s*(\S+)")
 
 
 def print_stats(name: str, arr: np.ndarray) -> None:
@@ -35,7 +58,114 @@ def print_stats(name: str, arr: np.ndarray) -> None:
     print(f"  Inf count: {np.isinf(arr).sum()}")
 
 
-def evaluate_file(file_path: Path) -> dict[str, float | str | tuple[int, ...]]:
+def read_initial_residuals(log_path: Path) -> dict[str, list[float]]:
+    residuals = {field: [] for field in RESIDUAL_FIELDS}
+    current_time = ""
+    occurrences_at_time = {field: 0 for field in RESIDUAL_FIELDS}
+
+    with log_path.open("r", encoding="utf-8", errors="replace") as log_file:
+        for line in log_file:
+            time_match = TIME_RE.match(line.strip())
+            if time_match:
+                current_time = time_match.group(1)
+                occurrences_at_time = {field: 0 for field in RESIDUAL_FIELDS}
+                continue
+
+            match = RESIDUAL_RE.search(line)
+            if not match:
+                continue
+            field, value = match.groups()
+            occurrences_at_time[field] += 1
+            target_occurrence = 3 if field == "p" else 1
+            if current_time and occurrences_at_time[field] != target_occurrence:
+                continue
+            residuals[field].append(float(value))
+
+    return residuals
+
+
+def check_residual_series(values: list[float]) -> tuple[str, str]:
+    arr = np.asarray(values, dtype=np.float64)
+    arr = arr[np.isfinite(arr) & (arr > 0.0)]
+    if arr.size < 20:
+        return "nOK", f"too_few_residual_points={arr.size}"
+
+    window = max(20, int(math.ceil(0.1 * arr.size)))
+    tail = arr[-window:]
+    reasons: list[str] = []
+
+    if float(np.max(tail)) >= RESIDUAL_LIMIT:
+        reasons.append(f"tail_max={np.max(tail):.6g}>={RESIDUAL_LIMIT:.0e}")
+    half = window // 2
+    tail_start_median = float(np.median(tail[:half]))
+    tail_end_median = float(np.median(tail[half:]))
+    if tail_end_median > RESIDUAL_STRONG_GROWTH_FACTOR * tail_start_median:
+        reasons.append(
+            f"strongly_increasing(tail_ratio={tail_end_median / tail_start_median:.3g})"
+        )
+
+    return ("nOK", ";".join(reasons)) if reasons else ("OK", "")
+
+
+def evaluate_residuals(log_path: Path) -> tuple[dict[str, list[float]], str, str]:
+    if not log_path.is_file():
+        return {field: [] for field in RESIDUAL_FIELDS}, "nOK", "missing_04_simpleFoam.log"
+
+    residuals = read_initial_residuals(log_path)
+    failures: list[str] = []
+    for field in RESIDUAL_CHECK_FIELDS:
+        status, reason = check_residual_series(residuals[field])
+        if status != "OK":
+            failures.append(f"{field}:{reason}")
+    return residuals, ("nOK" if failures else "OK"), " | ".join(failures)
+
+
+def save_residual_figure(
+    case_name: str,
+    residuals: dict[str, list[float]],
+    output_path: Path,
+) -> None:
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for field in RESIDUAL_FIELDS:
+        values = np.asarray(residuals[field], dtype=np.float64)
+        if values.size:
+            ax.semilogy(np.arange(1, values.size + 1), values, label=field, linewidth=1.0)
+    ax.axhline(
+        RESIDUAL_LIMIT,
+        color="black",
+        linestyle="--",
+        linewidth=1.0,
+        label=f"{RESIDUAL_LIMIT:g} limit",
+    )
+    ax.set_xlabel("SIMPLE iteration")
+    ax.set_ylabel("Initial residual")
+    ax.set_title(f"Initial residuals: {case_name}")
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=140)
+    plt.close(fig)
+
+
+def write_inspection_csv(rows: list[dict[str, object]], output_path: Path) -> None:
+    fields = [
+        "case_name", "filename", "overall_status", "overall_reason",
+        "residuals_status", "residuals_reason", "field_range_status", "field_range_reason",
+        "manual_status", "manual_reason",
+        "ux_residual_last", "uy_residual_last", "p_residual_last",
+        "omega_residual_last", "k_residual_last",
+        "ux_min", "ux_max", "p_min", "p_max", "plausibility", "plausibility_reason",
+    ]
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fields)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row[field] for field in fields})
+
+
+def evaluate_file(file_path: Path) -> dict[str, object]:
     with np.load(file_path, allow_pickle=True) as data:
         required = ["xy", "p", "U", "fluid_mask"]
         for key in required:
@@ -57,9 +187,21 @@ def evaluate_file(file_path: Path) -> dict[str, float | str | tuple[int, ...]]:
 
         fluid_binary = fluid_mask > 0.5
         solid_fraction = 1.0 - float(np.mean(fluid_binary.astype(np.float32)))
+        ux_values = u[:, :, 0][fluid_binary]
+        p_values = p[fluid_binary]
+        ux_min = float(np.nanmin(ux_values))
+        ux_max = float(np.nanmax(ux_values))
+        field_p_min = float(np.nanmin(p_values))
+        field_p_max = float(np.nanmax(p_values))
+        range_reasons: list[str] = []
+        if ux_min < FIELD_UX_MIN or ux_max > FIELD_UX_MAX:
+            range_reasons.append(f"Ux=[{ux_min:.6g},{ux_max:.6g}] outside [{FIELD_UX_MIN:g},{FIELD_UX_MAX:g}]")
+        if field_p_min < FIELD_P_MIN or field_p_max > FIELD_P_MAX:
+            range_reasons.append(f"p=[{field_p_min:.6g},{field_p_max:.6g}] outside [{FIELD_P_MIN:g},{FIELD_P_MAX:g}]")
 
         return {
             "filename": file_path.name,
+            "case_name": file_path.parent.name,
             "shape": tuple(int(v) for v in p.shape),
             "solid_fraction": solid_fraction,
             "plausibility": plausibility.plausibility,
@@ -72,6 +214,10 @@ def evaluate_file(file_path: Path) -> dict[str, float | str | tuple[int, ...]]:
             "u_median": plausibility.u_median,
             "p_mean": float(np.nanmean(p)),
             "p_std": float(np.nanstd(p)),
+            "ux_min": ux_min,
+            "ux_max": ux_max,
+            "field_range_status": "nOK" if range_reasons else "OK",
+            "field_range_reason": ";".join(range_reasons),
             "ux_mean": float(np.nanmean(u[:, :, 0])),
             "ux_std": float(np.nanstd(u[:, :, 0])),
             "uy_mean": float(np.nanmean(u[:, :, 1])),
@@ -149,6 +295,7 @@ def main() -> None:
     paths = load_paths(config_path)
     data_dir = paths.flow_fields_output
     pictures_dir = PROJECT_ROOT / PICTURES_SUBDIR
+    residuals_dir = pictures_dir / RESIDUALS_SUBDIR
 
     if SAVE_FIGURES:
         if pictures_dir.exists():
@@ -169,14 +316,37 @@ def main() -> None:
     print(f"[INFO] Scanning directory: {data_dir}")
     print(f"[INFO] Found files: {len(files)}")
 
-    ok_results: list[dict[str, float | str | tuple[int, ...]]] = []
+    ok_results: list[dict[str, object]] = []
     failed: list[tuple[str, str]] = []
-    plausibility_nok: list[dict[str, float | str | tuple[int, ...]]] = []
+    plausibility_nok: list[dict[str, object]] = []
     saved_figures = 0
 
     for idx, file_path in enumerate(files, start=1):
         try:
             result = evaluate_file(file_path)
+            residuals, residuals_status, residuals_reason = evaluate_residuals(
+                file_path.parent / "logs" / "04_simpleFoam.log"
+            )
+            result["residuals_status"] = residuals_status
+            result["residuals_reason"] = residuals_reason
+            manual_reason = MANUALLY_EXCLUDED_CASES.get(file_path.parent.name, "")
+            result["manual_status"] = "nOK" if manual_reason else "OK"
+            result["manual_reason"] = manual_reason
+            for field in RESIDUAL_FIELDS:
+                result[f"{field.lower()}_residual_last"] = (
+                    residuals[field][-1] if residuals[field] else ""
+                )
+            overall_reasons: list[str] = []
+            if str(result["plausibility"]) != "OK":
+                overall_reasons.append(f"plausibility:{result['plausibility_reason']}")
+            if residuals_status != "OK":
+                overall_reasons.append(f"residuals:{residuals_reason}")
+            if str(result["field_range_status"]) != "OK":
+                overall_reasons.append(f"field_range:{result['field_range_reason']}")
+            if str(result["manual_status"]) != "OK":
+                overall_reasons.append(f"manual:{result['manual_reason']}")
+            result["overall_status"] = "nOK" if overall_reasons else "OK"
+            result["overall_reason"] = " | ".join(overall_reasons)
             ok_results.append(result)
             if str(result["plausibility"]) != "OK":
                 plausibility_nok.append(result)
@@ -184,6 +354,11 @@ def main() -> None:
             if SAVE_FIGURES:
                 output_png = pictures_dir / f"{file_path.stem}.png"
                 save_diagnostic_figure(file_path, output_png)
+                save_residual_figure(
+                    file_path.parent.name,
+                    residuals,
+                    residuals_dir / f"{file_path.parent.name}.png",
+                )
                 saved_figures += 1
 
             print(f"[{idx}/{len(files)}] OK  {file_path.name}")
@@ -194,23 +369,7 @@ def main() -> None:
     if not ok_results:
         raise RuntimeError("All files failed validation.")
 
-    write_plausibility_csv(
-        [
-            PlausibilityResult(
-                case_name=str(row["filename"]),
-                plausibility=str(row["plausibility"]),
-                reason=str(row["plausibility_reason"]),
-                p_min=float(row["p_min"]),
-                p_max=float(row["p_max"]),
-                p_median=float(row["p_median"]),
-                u_min=float(row["u_min"]),
-                u_max=float(row["u_max"]),
-                u_median=float(row["u_median"]),
-            )
-            for row in ok_results
-        ],
-        csv_output_path,
-    )
+    write_inspection_csv(ok_results, csv_output_path)
 
     p_means = np.array([float(r["p_mean"]) for r in ok_results], dtype=np.float64)
     p_stds = np.array([float(r["p_std"]) for r in ok_results], dtype=np.float64)
@@ -227,6 +386,14 @@ def main() -> None:
     print(f"Processed successfully: {len(ok_results)}")
     print(f"Failed: {len(failed)}")
     print(f"Plausibility nOK: {len(plausibility_nok)}")
+    print(
+        "Overall inspection nOK (excluded from training): "
+        f"{sum(str(row['overall_status']) != 'OK' for row in ok_results)}"
+    )
+    print(
+        "Manually excluded: "
+        f"{sum(str(row['manual_status']) != 'OK' for row in ok_results)}"
+    )
     print(f"Unique grid shapes: {unique_shapes}")
     print(
         "Solid fraction (min/mean/max): "
@@ -253,6 +420,7 @@ def main() -> None:
     if SAVE_FIGURES:
         print(f"Saved/updated figures: {saved_figures}")
         print(f"Figures directory: {pictures_dir}")
+        print(f"Residual figures directory: {residuals_dir}")
     print(f"Plausibility CSV: {csv_output_path}")
 
     # Print detailed stats for one representative valid file.

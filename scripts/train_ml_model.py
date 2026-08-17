@@ -52,9 +52,9 @@ CLCD_TARGET_ORDER = ["Cl", "Cd"]
 
 
 def _load_reference_grid_spacing(data_dir: Path) -> tuple[float, float]:
-    files = sorted(data_dir.glob("*_flow.npz"))
+    files = sorted(data_dir.glob("*/*.npz"))
     if not files:
-        raise RuntimeError(f"No *_flow.npz files found in {data_dir}")
+        raise RuntimeError(f"No flow-field NPZ files found in case directories under {data_dir}")
 
     with np.load(files[0], allow_pickle=False) as data:
         xy = torch.from_numpy(data["xy"].astype(np.float32))
