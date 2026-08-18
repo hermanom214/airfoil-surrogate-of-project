@@ -9,6 +9,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import torch
+import matplotlib
+
+matplotlib.use("Agg")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
@@ -115,7 +118,7 @@ def run_clcd_validation() -> None:
     checkpoint = load_clcd_checkpoint(checkpoint_path=checkpoint_path)
 
     clcd_cfg = ml_cfg.model.params.clcd_mlp
-    cases_root = paths.openfoam_case_sim / clcd_cfg.cases_subdir
+    cases_root = paths.flow_fields_output / clcd_cfg.cases_subdir
 
     dataset = AirfoilClCdDataset(
         cases_root=cases_root,

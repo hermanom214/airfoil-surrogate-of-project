@@ -37,7 +37,11 @@ FIELD_P_MIN = -1000.0
 FIELD_P_MAX = 500.0
 MANUALLY_EXCLUDED_CASES = {
     "case_0354_naca1416_aoam4p0_u22p5": "visually_invalid_flow_field",
+    "case_0453_naca2214_aoam4p0_u20p0": "visually_invalid_wake_pressure_field",
+    "case_0603_naca2416_aoam4p0_u20p0": "visually_invalid_flow_field",
+    "case_0604_naca2416_aoam4p0_u22p5": "visually_invalid_flow_field",
     "case_0610_naca2416_aoam2p0_u25p0": "visually_invalid_flow_field",
+    "case_0620_naca2416_aoa2p0_u25p0": "visually_invalid_flow_field"
 }
 
 RESIDUAL_RE = re.compile(
