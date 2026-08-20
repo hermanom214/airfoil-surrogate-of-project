@@ -162,3 +162,33 @@ Scalar evaluation outputs:
 
 Reusable scalar inference API is in [src/clcd_inference.py](../src/clcd_inference.py),
 designed for evaluation, future GUI, REST API, and standalone predictions.
+
+## Reproducible experiments
+
+Training now reserves a persisted 20% fixed test set before tuning. The remaining
+development cases use seeded K-fold or NACA-group-held-out CV. Normalization is
+refit on each fold's training cases and, for the final model, on all development
+cases; test cases never contribute statistics or model selection.
+
+```bash
+python scripts/train_ml_model.py --model clcd_mlp
+python scripts/train_ml_model.py --model clcd_mlp --cv-strategy group_kfold_naca
+python scripts/train_ml_model.py --model simple_unet
+python scripts/train_ml_model.py --model simple_unet --cv-strategy group_kfold_naca
+python scripts/train_ml_model.py --model rans_pinn
+python scripts/train_ml_model.py --model rans_pinn --search-strategy none  # CV, no search
+python scripts/train_ml_model.py --model rans_pinn --search-strategy none --single-run
+python scripts/train_ml_model.py --model simple_unet --smoke-test
+python scripts/train_ml_model.py --model simple_unet --regenerate-split
+```
+
+Split, CV, search, checkpoint, and final-test artifacts are written below
+`data/models/<model_name>/`. Search spaces and per-model defaults are defined in
+`configs/ml_models_config.yaml`.
+
+`hyperparameter_search.strategy: none` disables only search. CV remains controlled
+independently by `data_split.cv_enabled`; `--single-run` explicitly disables CV.
+An incompatible persisted dataset fingerprint stops training. Replacing its fixed
+test population requires the explicit `--regenerate-split` flag. Smoke artifacts
+are isolated under `data/models/<model_name>/smoke_test/` and do not overwrite a
+production checkpoint or production CV results.

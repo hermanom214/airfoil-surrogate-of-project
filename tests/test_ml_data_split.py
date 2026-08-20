@@ -56,5 +56,6 @@ def test_training_and_evaluation_scripts_use_shared_split_function() -> None:
     train_source = inspect.getsource(train_script)
     eval_source = inspect.getsource(evaluate_script)
 
-    assert "build_train_val_split(" in train_source
+    assert "load_or_create_fixed_test_split(" in train_source
+    assert "build_cv_folds(" in train_source
     assert "build_train_val_split(" in eval_source

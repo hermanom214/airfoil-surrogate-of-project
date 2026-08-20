@@ -67,7 +67,9 @@ def test_dataset_returns_float32_tensors(tmp_path) -> None:
     u = np.zeros((h, w, 2), dtype=np.float32)
     fluid_mask = np.ones((h, w), dtype=np.float32)
 
-    sample_path = tmp_path / "case_0001_naca0012_aoa0p0_u15p0_flow.npz"
+    case_dir = tmp_path / "case_0001_naca0012_aoa0p0_u15p0"
+    case_dir.mkdir()
+    sample_path = case_dir / "case_0001_naca0012_aoa0p0_u15p0_flow.npz"
     np.savez_compressed(sample_path, xy=xy, p=p, U=u, fluid_mask=fluid_mask)
 
     dataset = AirfoilFlowDataset(tmp_path)

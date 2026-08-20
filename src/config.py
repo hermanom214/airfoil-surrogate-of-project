@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 import yaml
 
 
@@ -145,6 +146,31 @@ class MLTrainingConfig:
 
 
 @dataclass
+class MLDataSplitConfig:
+    test_fraction: float = 0.2
+    seed: int = 42
+    cv_strategy: str = "kfold"
+    n_folds: int = 5
+    cv_enabled: bool = True
+    regenerate_on_dataset_change: bool = False
+
+
+@dataclass
+class MLHyperparameterSearchConfig:
+    strategy: str = "none"
+    n_iter: int = 1
+    seed: int = 42
+    search_space: dict[str, list[Any]] = field(default_factory=dict)
+    manual_coarse_configs: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class MLExperimentConfig:
+    data_split: MLDataSplitConfig
+    hyperparameter_search: MLHyperparameterSearchConfig
+
+
+@dataclass
 class MLPhysicsLossConfig:
     nu: float
     weight: float
@@ -167,6 +193,14 @@ class MLModelsConfig:
     training: MLTrainingConfig
     physics_loss: MLPhysicsLossConfig
     output: MLOutputConfig
+    data_split: MLDataSplitConfig
+    hyperparameter_search: MLHyperparameterSearchConfig
+    experiments: dict[str, MLExperimentConfig]
+
+    def experiment_for(self, model_name: str) -> MLExperimentConfig:
+        return self.experiments.get(
+            model_name, MLExperimentConfig(self.data_split, self.hyperparameter_search)
+        )
 
 
 def load_paths(config_path: Path) -> ProjectPaths:
@@ -289,6 +323,8 @@ def load_ml_models_config(config_path: Path) -> MLModelsConfig:
     training_data = data["training"]
     physics_data = data["physics_loss"]
     output_data = data["output"]
+    split_data = data.get("data_split", {})
+    search_data = data.get("hyperparameter_search", {})
 
     model = MLModelConfig(
         name=str(model_data["name"]),
@@ -342,9 +378,51 @@ def load_ml_models_config(config_path: Path) -> MLModelsConfig:
         filename_template=str(output_data["filename_template"]),
     )
 
+    def parse_split(values: dict[str, Any]) -> MLDataSplitConfig:
+        merged = {**split_data, **values}
+        strategy = str(merged.get("cv_strategy", "kfold"))
+        if strategy not in {"kfold", "group_kfold_naca"}:
+            raise ValueError(f"Unsupported cv_strategy: {strategy}")
+        return MLDataSplitConfig(
+            test_fraction=float(merged.get("test_fraction", 0.2)),
+            seed=int(merged.get("seed", 42)),
+            cv_strategy=strategy,
+            n_folds=int(merged.get("n_folds", 5)),
+            cv_enabled=bool(merged.get("cv_enabled", True)),
+            regenerate_on_dataset_change=bool(merged.get("regenerate_on_dataset_change", False)),
+        )
+
+    def parse_search(values: dict[str, Any]) -> MLHyperparameterSearchConfig:
+        merged = {**search_data, **values}
+        strategy = str(merged.get("strategy", "none"))
+        if strategy not in {"none", "randomized", "manual_coarse"}:
+            raise ValueError(f"Unsupported hyperparameter search strategy: {strategy}")
+        return MLHyperparameterSearchConfig(
+            strategy=strategy,
+            n_iter=int(merged.get("n_iter", 1)),
+            seed=int(merged.get("seed", 42)),
+            search_space={str(k): list(v) for k, v in merged.get("search_space", {}).items()},
+            manual_coarse_configs=[dict(v) for v in merged.get("manual_coarse_configs", [])],
+        )
+
+    global_split = parse_split({})
+    global_search = parse_search({})
+    experiments = {
+        str(name): MLExperimentConfig(
+            data_split=parse_split((overrides or {}).get("data_split", {})),
+            hyperparameter_search=parse_search(
+                (overrides or {}).get("hyperparameter_search", {})
+            ),
+        )
+        for name, overrides in data.get("experiments", {}).items()
+    }
+
     return MLModelsConfig(
         model=model,
         training=training,
         physics_loss=physics_loss,
         output=output,
+        data_split=global_split,
+        hyperparameter_search=global_search,
+        experiments=experiments,
     )

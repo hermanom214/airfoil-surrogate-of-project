@@ -27,6 +27,49 @@ training:
   validation_split: 0.2 # rozumně 0.1–0.3
   split_seed: 42 # libovolné celé číslo pro reprodukovatelnost
 
+data_split:
+  test_fraction: 0.20
+  seed: 42
+  cv_strategy: kfold # kfold | group_kfold_naca
+  regenerate_on_dataset_change: false
+
+hyperparameter_search:
+  seed: 42
+
+# Each model selects its own execution mode. Shared split/search values above
+# are inherited, but cv_enabled, n_folds and strategy have one model-local source.
+experiments:
+  clcd_mlp:
+    data_split: {cv_enabled: false, n_folds: 5}
+    hyperparameter_search:
+      strategy: none # randomized pro CV s hyperparameter search
+      n_iter: 20
+      search_space:
+        learning_rate: [0.001, 0.0003, 0.0001]
+        batch_size: [16, 32, 64]
+        weight_decay: [0.0, 0.00001, 0.0001]
+        dropout: [0.0, 0.1, 0.2]
+        hidden_dims: [[32, 32], [64, 64], [128, 128, 64]]
+  simple_unet:
+    data_split: {cv_enabled: false, n_folds: 3}
+    hyperparameter_search:
+      strategy: none
+      n_iter: 8
+      search_space:
+        learning_rate: [0.001, 0.0003, 0.0001]
+        batch_size: [1, 2, 4]
+        weight_decay: [0.0, 0.00001, 0.0001]
+        encoder_channels: [[16, 32, 64], [32, 64, 128]]
+        bottleneck_channels: [128, 256]
+  rans_pinn:
+    data_split: {cv_enabled: false, n_folds: 3}
+    hyperparameter_search:
+      strategy: none # manual_coarse pro CV s hyperparameter search
+      manual_coarse_configs:
+        - {learning_rate: 0.001, physics_loss.weight: 1.0e-8, physics_loss.warmup_epochs: 30}
+        - {learning_rate: 0.0003, physics_loss.weight: 1.0e-8, physics_loss.warmup_epochs: 30}
+        - {learning_rate: 0.0003, physics_loss.weight: 1.0e-7, physics_loss.warmup_epochs: 20}
+
 physics_loss:
   nu: 1.5e-5 # kinematická viskozita [m^2/s], typicky 1e-6 až 1e-4 dle média
   weight: 1.0e-8 # váha physics loss, rozumně 1e-10 až 1e-3

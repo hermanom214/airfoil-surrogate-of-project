@@ -58,6 +58,17 @@ def _pick_validation_indices(
     case_names = [sample[2] for sample in dataset.samples]
     name_to_index = {name: idx for idx, name in enumerate(case_names)}
 
+    # New experiment checkpoints evaluate the fixed test set. Legacy checkpoints
+    # continue to use their saved validation holdout below.
+    test_case_ids = _to_str_list(checkpoint.get("test_case_ids"))
+    development_case_ids = _to_str_list(checkpoint.get("development_case_ids"))
+    if test_case_ids:
+        missing = [c for c in test_case_ids if c not in name_to_index]
+        if missing:
+            raise RuntimeError(f"Saved test cases are missing from the dataset: {missing}")
+        resolved = [name_to_index[c] for c in test_case_ids]
+        return resolved, test_case_ids, len(development_case_ids)
+
     val_case_ids = _to_str_list(checkpoint.get("val_case_ids"))
     train_case_ids = _to_str_list(checkpoint.get("train_case_ids"))
     val_indices_ckpt = _to_int_list(checkpoint.get("val_indices"))
@@ -103,7 +114,12 @@ def run_clcd_validation() -> None:
 
     model_name = "clcd_mlp"
     model_filename = ml_cfg.output.filename_template.format(model_name=model_name)
-    checkpoint_path = paths.project_root / ml_cfg.output.models_subdir / model_filename
+    checkpoint_path = (
+        paths.project_root / ml_cfg.output.models_subdir / model_name / model_filename
+    )
+    legacy_path = paths.project_root / ml_cfg.output.models_subdir / model_filename
+    if not checkpoint_path.exists() and legacy_path.exists():
+        checkpoint_path = legacy_path
 
     validation_root = paths.project_root / ml_cfg.output.models_subdir / f"{model_name}_validation"
     metrics_dir = validation_root / "metrics"
@@ -209,6 +225,7 @@ def run_clcd_validation() -> None:
 
     summary = {
         "model_name": str(checkpoint.get("model_name", model_name)),
+        "evaluation_split": "test" if checkpoint.get("test_case_ids") else "legacy_validation",
         "checkpoint": str(checkpoint_path),
         "validation_case_count": int(len(metrics_df)),
         "train_case_count": int(train_case_count),

@@ -1,342 +1,348 @@
-# Training script for the SimpleUNet surrogate model.
-# Loads pre-processed airfoil flow-field data (.npz files), splits it into
-# training and validation sets, trains a U-Net-based neural network to predict
-# CFD flow fields from geometry/condition inputs, and saves the resulting model
-# weights to disk.
-
+"""Reproducible fixed-test, cross-validation and tuning entry point."""
 from __future__ import annotations
+
+import argparse
+import json
+import random
 import sys
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
-# Allow imports from the project root (src/ package)
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from src.config import load_ml_models_config, load_paths
-from src.ml_data_split import build_train_val_split
 from src.ml_clcd_dataset import AirfoilClCdDataset
-from src.ml_dataset import AirfoilFlowDataset
-from src.ml_models import build_model
-from src.ml_training import (
-    compute_grid_spacing_from_xy,
-    evaluate,
-    train_one_epoch,
-    train_one_epoch_physics,
+from src.ml_data_split import (
+    build_holdout_fold,
+    build_cv_folds,
+    build_train_val_split,  # legacy API remains importable for older callers
+    load_or_create_fixed_test_split,
 )
-from src.ml_validation import plot_loss_curves
+from src.ml_dataset import AirfoilFlowDataset
+from src.ml_experiment import experiment_mode, run_cross_validation, write_experiment_results
+from src.ml_hyperparameter_search import generate_search_configurations
+from src.ml_models import AVAILABLE_MODELS, build_model
+from src.ml_training import evaluate, train_one_epoch, train_one_epoch_physics
 
 
-# --- Configuration -----------------------------------------------------------
-CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "paths.yaml"
-ML_CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "ml_models_config.yaml"
-PATHS = load_paths(CONFIG_PATH)  # Load project paths from YAML config
-ML_CFG = load_ml_models_config(ML_CONFIG_PATH)
-
-DATA_DIR = PATHS.flow_fields_output           # Directory with .npz flow-field files
-MODEL_NAME = ML_CFG.model.name
-MODEL_OUTPUT_FILENAME = ML_CFG.output.filename_template.format(model_name=MODEL_NAME)
-OUTPUT_PATH = PATHS.project_root / ML_CFG.output.models_subdir / MODEL_OUTPUT_FILENAME
-
-CLCD_FEATURE_ORDER = [
-    "camber_percent",
-    "camber_position_tenths",
-    "thickness_percent",
-    "aoa_deg",
-    "inlet_velocity",
-]
-CLCD_TARGET_ORDER = ["Cl", "Cd"]
+ROOT = Path(__file__).resolve().parents[1]
+PATHS = load_paths(ROOT / "configs" / "paths.yaml")
+ML_CFG = load_ml_models_config(ROOT / "configs" / "ml_models_config.yaml")
 
 
-def _load_reference_grid_spacing(file_path: Path) -> tuple[float, float]:
-    with np.load(file_path, allow_pickle=False) as data:
-        xy = torch.from_numpy(data["xy"].astype(np.float32))
-    return compute_grid_spacing_from_xy(xy)
-
-
-def _train_clcd_mlp(device: str) -> None:
-    clcd_cfg = ML_CFG.model.params.clcd_mlp
-    cases_root = DATA_DIR / clcd_cfg.cases_subdir
-    dataset = AirfoilClCdDataset(
-        cases_root=cases_root,
-        tail_window=clcd_cfg.tail_window,
-        force_coeffs_relpath=clcd_cfg.force_coeffs_relpath,
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model", choices=AVAILABLE_MODELS, default=ML_CFG.model.name)
+    parser.add_argument("--cv-strategy", choices=("kfold", "group_kfold_naca"))
+    parser.add_argument("--search-strategy", choices=("none", "randomized", "manual_coarse"))
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--single-run", action="store_true",
+        help="Disable CV explicitly; requires search strategy 'none'.",
     )
-    print(f"[INFO] Cl/Cd cases root: {cases_root}")
-    print(f"[INFO] Cl/Cd samples: {len(dataset)}")
-    print(f"[INFO] Valid samples: {len(dataset.samples)}")
-    print(f"[INFO] Skipped samples: {len(dataset.skipped_samples)}")
-
-    raw_targets = np.stack([s[1] for s in dataset.samples], axis=0)
-    cl_values = raw_targets[:, 0]
-    cd_values = raw_targets[:, 1]
-    print(
-        "[INFO] Target summary before normalization | "
-        f"Cl min/max/mean/std: {float(cl_values.min()):.6e}/"
-        f"{float(cl_values.max()):.6e}/"
-        f"{float(cl_values.mean()):.6e}/"
-        f"{float(cl_values.std()):.6e} | "
-        f"Cd min/max/mean/std: {float(cd_values.min()):.6e}/"
-        f"{float(cd_values.max()):.6e}/"
-        f"{float(cd_values.mean()):.6e}/"
-        f"{float(cd_values.std()):.6e}"
+    mode_group.add_argument(
+        "--cross-validation", action="store_true",
+        help="Enable cross-validation explicitly, overriding cv_enabled from config.",
     )
-
-    print("[INFO] First five samples:")
-    for features, targets, case_name in dataset.samples[:5]:
-        print(f"  Case: {case_name}")
-        print(f"  features: {features.tolist()}")
-        print(f"  targets: {targets.tolist()}")
-
-    split = build_train_val_split(
-        dataset=dataset,
-        validation_split=ML_CFG.training.validation_split,
-        split_seed=ML_CFG.training.split_seed,
+    parser.add_argument(
+        "--regenerate-split", action="store_true",
+        help="Explicitly replace an incompatible persisted fixed test split.",
     )
-    train_set = split.train_set
-    val_set = split.val_set
-    train_indices = split.train_indices
-    val_indices = split.val_indices
-
-    dataset.fit_normalization(train_indices)
-    print(
-        "[INFO] Feature normalization | "
-        f"{dataset.feature_mean.tolist()} / {dataset.feature_std.tolist()}"
+    parser.add_argument(
+        "--smoke-test", action="store_true",
+        help="Run the same workflow with 2 folds, at most 2 candidates and 2 epochs.",
     )
-    print(
-        "[INFO] Target normalization (Cl, Cd) | "
-        f"{dataset.target_mean.tolist()} / {dataset.target_std.tolist()}"
-    )
+    return parser.parse_args(argv)
 
-    train_loader = DataLoader(train_set, batch_size=ML_CFG.training.batch_size, shuffle=True)
-    val_loader = DataLoader(val_set, batch_size=ML_CFG.training.batch_size, shuffle=False)
 
-    model_kwargs = {
-        "input_dim": clcd_cfg.input_dim,
-        "hidden_dims": clcd_cfg.hidden_dims,
-        "output_dim": clcd_cfg.output_dim,
-        "dropout": clcd_cfg.dropout,
+def seed_everything(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def case_ids_for(dataset: Any, model_name: str) -> list[str]:
+    if model_name == "clcd_mlp":
+        return [str(sample[2]) for sample in dataset.samples]
+    return [path.parent.name for path in dataset.files]
+
+
+def fit_normalization(dataset: Any, model_name: str, train_indices: Sequence[int]) -> None:
+    """The only normalization gateway: callers must pass fold-train or full-development IDs."""
+    if model_name == "clcd_mlp":
+        dataset.fit_normalization(train_indices)
+    else:
+        dataset.fit_condition_normalization(train_indices)
+        dataset.fit_target_normalization(train_indices)
+
+
+def normalization_metadata(dataset: Any, model_name: str) -> dict[str, Any]:
+    if model_name == "clcd_mlp":
+        return {
+            "feature_mean": dataset.feature_mean.tolist(),
+            "feature_std": dataset.feature_std.tolist(),
+            "target_mean": dataset.target_mean.tolist(),
+            "target_std": dataset.target_std.tolist(),
+            "feature_order": list(dataset.FEATURE_ORDER),
+            "target_order": list(dataset.TARGET_ORDER),
+        }
+    return {key: float(getattr(dataset, key)) for key in (
+        "aoa_mean", "aoa_std", "inlet_u_mean", "inlet_u_std", "p_mean", "p_std",
+        "ux_mean", "ux_std", "uy_mean", "uy_std",
+    )}
+
+
+def model_kwargs(model_name: str, hp: Mapping[str, Any]) -> dict[str, Any]:
+    base = asdict(getattr(ML_CFG.model.params, model_name))
+    allowed = {
+        "clcd_mlp": {"input_dim", "hidden_dims", "output_dim", "dropout"},
+        "simple_unet": {"in_channels", "out_channels", "encoder_channels", "bottleneck_channels"},
+        "rans_pinn": {"in_channels", "out_channels", "hidden_channels", "depth"},
+    }[model_name]
+    return {key: hp.get(key, value) for key, value in base.items() if key in allowed}
+
+
+def base_hyperparameters(model_name: str) -> dict[str, Any]:
+    values: dict[str, Any] = {
+        "learning_rate": ML_CFG.training.learning_rate,
+        "batch_size": ML_CFG.training.batch_size,
+        "weight_decay": 0.0,
     }
-    model = build_model(MODEL_NAME, **model_kwargs).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=ML_CFG.training.learning_rate)
+    values.update(asdict(getattr(ML_CFG.model.params, model_name)))
+    if model_name == "clcd_mlp":
+        for key in ("cases_subdir", "force_coeffs_relpath", "tail_window"):
+            values.pop(key, None)
+    if model_name == "rans_pinn":
+        values["physics_loss.weight"] = ML_CFG.physics_loss.weight
+        values["physics_loss.warmup_epochs"] = ML_CFG.physics_loss.warmup_epochs
+    return values
+
+
+def train_clcd(dataset: AirfoilClCdDataset, train_indices: Sequence[int],
+               eval_indices: Sequence[int], hp: Mapping[str, Any], device: str,
+               seed: int, epochs: int) -> tuple[torch.nn.Module, dict[str, float]]:
+    seed_everything(seed)
+    fit_normalization(dataset, "clcd_mlp", train_indices)
+    batch = int(hp["batch_size"])
+    train_loader = DataLoader(Subset(dataset, list(train_indices)), batch_size=batch,
+                              shuffle=True, generator=torch.Generator().manual_seed(seed))
+    eval_loader = DataLoader(Subset(dataset, list(eval_indices)), batch_size=batch, shuffle=False)
+    model = build_model("clcd_mlp", **model_kwargs("clcd_mlp", hp)).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=float(hp["learning_rate"]),
+                                 weight_decay=float(hp.get("weight_decay", 0.0)))
     criterion = torch.nn.MSELoss()
-
-    train_history: list[float] = []
-    val_history: list[float] = []
-
-    for epoch in range(1, ML_CFG.training.epochs + 1):
+    for _ in range(epochs):
         model.train()
-        train_loss_sum = 0.0
         for features, targets in train_loader:
-            features = features.to(device)
-            targets = targets.to(device)
-
-            preds = model(features)
-            loss = criterion(preds, targets)
+            loss = criterion(model(features.to(device)), targets.to(device))
             if not torch.isfinite(loss):
-                raise RuntimeError("Non-finite training loss detected.")
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            train_loss_sum += float(loss.item())
-
-        model.eval()
-        val_loss_sum = 0.0
-        with torch.no_grad():
-            for features, targets in val_loader:
-                features = features.to(device)
-                targets = targets.to(device)
-                preds = model(features)
-                loss = criterion(preds, targets)
-                if not torch.isfinite(loss):
-                    raise RuntimeError("Non-finite training loss detected.")
-                val_loss_sum += float(loss.item())
-
-        train_loss = train_loss_sum / max(len(train_loader), 1)
-        val_loss = val_loss_sum / max(len(val_loader), 1)
-        train_history.append(train_loss)
-        val_history.append(val_loss)
-
-        print(
-            f"Epoch {epoch:03d} | "
-            f"train loss: {train_loss:.6e} | "
-            f"val loss: {val_loss:.6e}"
-        )
-
-    if not np.isfinite(np.asarray(train_history, dtype=np.float64)).all():
-        raise RuntimeError("Non-finite values detected in train_history. Refusing to save model.")
-    if not np.isfinite(np.asarray(val_history, dtype=np.float64)).all():
-        raise RuntimeError("Non-finite values detected in val_history. Refusing to save model.")
-
-    checkpoint = {
-        "model_name": MODEL_NAME,
-        "model_state_dict": model.state_dict(),
-        "feature_mean": dataset.feature_mean.tolist(),
-        "feature_std": dataset.feature_std.tolist(),
-        "target_mean": dataset.target_mean.tolist(),
-        "target_std": dataset.target_std.tolist(),
-        "feature_order": CLCD_FEATURE_ORDER,
-        "target_order": CLCD_TARGET_ORDER,
-        "train_indices": [int(i) for i in train_indices],
-        "val_indices": [int(i) for i in val_indices],
+                raise RuntimeError("Non-finite Cl/Cd training loss")
+            optimizer.zero_grad(); loss.backward(); optimizer.step()
+    model.eval()
+    losses: list[float] = []
+    truths: list[np.ndarray] = []
+    predictions: list[np.ndarray] = []
+    with torch.no_grad():
+        for features, targets in eval_loader:
+            pred = model(features.to(device)).cpu()
+            losses.append(float(criterion(pred, targets).item()))
+            truths.append(targets.numpy() * dataset.target_std + dataset.target_mean)
+            predictions.append(pred.numpy() * dataset.target_std + dataset.target_mean)
+    true = np.concatenate(truths); pred = np.concatenate(predictions)
+    error = pred - true
+    return model, {
+        "objective": float(np.mean(losses)),
+        "cl_mae": float(np.mean(np.abs(error[:, 0]))),
+        "cd_mae": float(np.mean(np.abs(error[:, 1]))),
+        "cl_rmse": float(np.sqrt(np.mean(error[:, 0] ** 2))),
+        "cd_rmse": float(np.sqrt(np.mean(error[:, 1] ** 2))),
     }
-    torch.save(checkpoint, OUTPUT_PATH)
-    print("[INFO] Final verification passed:")
-    print("[INFO] - No NaN entered normalization")
-    print("[INFO] - No NaN entered training")
-    print("[INFO] - No corrupted model was saved")
-    print(f"[INFO] Total valid samples: {len(dataset.samples)}")
-    print(f"[INFO] Total skipped samples: {len(dataset.skipped_samples)}")
-    print(f"[INFO] Train samples: {len(train_set)}")
-    print(f"[INFO] Validation samples: {len(val_set)}")
-    print(
-        "[INFO] Feature statistics (mean/std): "
-        f"{dataset.feature_mean.tolist()} / {dataset.feature_std.tolist()}"
-    )
-    print(
-        "[INFO] Target statistics (mean/std): "
-        f"{dataset.target_mean.tolist()} / {dataset.target_std.tolist()}"
-    )
-    print(f"[INFO] Checkpoint location: {OUTPUT_PATH}")
 
-    plot_path = OUTPUT_PATH.with_name(OUTPUT_PATH.stem + "_loss_curves.png")
-    plot_loss_curves(train_history, val_history, plot_path)
+
+def train_field(dataset: AirfoilFlowDataset, model_name: str,
+                train_indices: Sequence[int], eval_indices: Sequence[int],
+                hp: Mapping[str, Any], device: str, seed: int,
+                dx: float, dy: float, epochs: int) -> tuple[torch.nn.Module, dict[str, float]]:
+    seed_everything(seed)
+    fit_normalization(dataset, model_name, train_indices)
+    batch = int(hp["batch_size"])
+    train_loader = DataLoader(Subset(dataset, list(train_indices)), batch_size=batch,
+                              shuffle=True, generator=torch.Generator().manual_seed(seed))
+    eval_loader = DataLoader(Subset(dataset, list(eval_indices)), batch_size=batch, shuffle=False)
+    model = build_model(model_name, **model_kwargs(model_name, hp)).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=float(hp["learning_rate"]),
+                                 weight_decay=float(hp.get("weight_decay", 0.0)))
+    for epoch in range(epochs):
+        if model_name == "rans_pinn":
+            warmup = int(hp.get("physics_loss.warmup_epochs", ML_CFG.physics_loss.warmup_epochs))
+            physics_weight = 0.0 if epoch < warmup else float(
+                hp.get("physics_loss.weight", ML_CFG.physics_loss.weight)
+            )
+            train_one_epoch_physics(
+                model, train_loader, optimizer, device, dx, dy, ML_CFG.physics_loss.nu,
+                dataset.p_mean, dataset.p_std, dataset.ux_mean, dataset.ux_std,
+                dataset.uy_mean, dataset.uy_std, physics_weight,
+                ML_CFG.physics_loss.pressure_is_kinematic, ML_CFG.physics_loss.mask_erode_pixels,
+            )
+        else:
+            train_one_epoch(model, train_loader, optimizer, device)
+    objective = evaluate(model, eval_loader, device)
+    return model, {"objective": float(objective), "normalized_masked_mse": float(objective)}
 
 
 def main() -> None:
-    # Ensure the output directory exists before saving the model
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-    # Use GPU if available, otherwise fall back to CPU
+    args = parse_args()
+    model_name = args.model
+    experiment = ML_CFG.experiment_for(model_name)
+    split_cfg = experiment.data_split
+    search_cfg = experiment.hyperparameter_search
+    cv_strategy = args.cv_strategy or split_cfg.cv_strategy
+    search_strategy = args.search_strategy or search_cfg.strategy
+    cv_enabled = (
+        True if args.cross_validation else False if args.single_run else split_cfg.cv_enabled
+    )
+    mode = experiment_mode(cv_enabled, search_strategy)
+    epochs = min(2, ML_CFG.training.epochs) if args.smoke_test else ML_CFG.training.epochs
+    n_folds = min(2, split_cfg.n_folds) if args.smoke_test else split_cfg.n_folds
+    n_iter = min(2, search_cfg.n_iter) if args.smoke_test else search_cfg.n_iter
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[INFO] Device: {device}")
-    print(f"[INFO] Data dir: {DATA_DIR}")
+    seed_everything(split_cfg.seed)
 
-    if MODEL_NAME == "clcd_mlp":
-        _train_clcd_mlp(device)
-        return
-
-    # Load the full dataset of flow-field samples
-    dataset = AirfoilFlowDataset(DATA_DIR)
-    dx, dy = _load_reference_grid_spacing(dataset.files[0])
-    print(f"[INFO] Grid spacing | dx: {dx:.6e} | dy: {dy:.6e}")
-
-    split = build_train_val_split(
-        dataset=dataset,
-        validation_split=ML_CFG.training.validation_split,
-        split_seed=ML_CFG.training.split_seed,
-    )
-    train_set = split.train_set
-    val_set = split.val_set
-    train_indices = split.train_indices
-
-    # Fit condition normalisation from training samples only
-    dataset.fit_condition_normalization(train_indices)
-    dataset.fit_target_normalization(train_indices)
-    print(
-        "[INFO] Condition norm stats | "
-        f"aoa mean/std: {dataset.aoa_mean:.4f}/{dataset.aoa_std:.4f} | "
-        f"inlet_u mean/std: {dataset.inlet_u_mean:.4f}/{dataset.inlet_u_std:.4f}"
-    )
-    print(
-        "[INFO] Target norm stats | "
-        f"p mean/std: {dataset.p_mean:.4f}/{dataset.p_std:.4f} | "
-        f"ux mean/std: {dataset.ux_mean:.4f}/{dataset.ux_std:.4f} | "
-        f"uy mean/std: {dataset.uy_mean:.4f}/{dataset.uy_std:.4f}"
-    )
-
-    # Create data loaders for batched iteration
-    train_loader = DataLoader(train_set, batch_size=ML_CFG.training.batch_size, shuffle=True)
-    val_loader = DataLoader(val_set, batch_size=ML_CFG.training.batch_size, shuffle=False)
-
-    # Initialise selected model and Adam optimiser
-    if MODEL_NAME == "simple_unet":
-        model_kwargs = asdict(ML_CFG.model.params.simple_unet)
-    elif MODEL_NAME == "rans_pinn":
-        model_kwargs = asdict(ML_CFG.model.params.rans_pinn)
-    else:
-        raise ValueError(f"Unsupported model in config: {MODEL_NAME}")
-
-    model = build_model(MODEL_NAME, **model_kwargs).to(device)
-    print(f"[INFO] Model: {MODEL_NAME}")
-    optimizer = torch.optim.Adam(model.parameters(), lr=ML_CFG.training.learning_rate)
-    physics_available = hasattr(model, "rans_residual_loss")
-    if physics_available:
-        print("[INFO] Physics residual loss: enabled (model supports rans_residual_loss)")
-    else:
-        print("[INFO] Physics residual loss: disabled (model has no rans_residual_loss)")
-
-    # Accumulators for loss history (used for the final plot)
-    train_history: list[float] = []
-    val_history: list[float] = []
-
-    # --- Training loop -------------------------------------------------------
-    for epoch in range(1, ML_CFG.training.epochs + 1):
-        if not physics_available:
-            physics_weight = 0.0
-        elif epoch < ML_CFG.physics_loss.warmup_epochs:
-            physics_weight = 0.0
-        else:
-            physics_weight = ML_CFG.physics_loss.weight
-
-        if physics_available:
-            train_metrics = train_one_epoch_physics(
-                model=model,
-                loader=train_loader,
-                optimizer=optimizer,
-                device=device,
-                dx=dx,
-                dy=dy,
-                nu=ML_CFG.physics_loss.nu,
-                p_mean=dataset.p_mean,
-                p_std=dataset.p_std,
-                ux_mean=dataset.ux_mean,
-                ux_std=dataset.ux_std,
-                uy_mean=dataset.uy_mean,
-                uy_std=dataset.uy_std,
-                physics_weight=physics_weight,
-                pressure_is_kinematic=ML_CFG.physics_loss.pressure_is_kinematic,
-                mask_erode_pixels=ML_CFG.physics_loss.mask_erode_pixels,
-            )
-        else:
-            data_loss = train_one_epoch(model, train_loader, optimizer, device)
-            train_metrics = {
-                "loss_total": data_loss,
-                "loss_data": data_loss,
-                "loss_physics": 0.0,
-                "loss_continuity": 0.0,
-                "loss_momentum_x": 0.0,
-                "loss_momentum_y": 0.0,
-            }
-        val_loss = evaluate(model, val_loader, device)                        # Evaluate on validation set
-
-        train_history.append(train_metrics["loss_total"])
-        val_history.append(val_loss)
-
-        print(
-            f"Epoch {epoch:03d} | "
-            f"physics_weight: {physics_weight:.6e} | "
-            f"total loss: {train_metrics['loss_total']:.6e} | "
-            f"data loss: {train_metrics['loss_data']:.6e} | "
-            f"physics loss: {train_metrics['loss_physics']:.6e} | "
-            f"continuity loss: {train_metrics['loss_continuity']:.6e} | "
-            f"momentum_x_loss: {train_metrics['loss_momentum_x']:.6e} | "
-            f"momentum_y_loss: {train_metrics['loss_momentum_y']:.6e} | "
-            f"val loss: {val_loss:.6e}"
+    if model_name == "clcd_mlp":
+        cfg = ML_CFG.model.params.clcd_mlp
+        dataset: Any = AirfoilClCdDataset(
+            PATHS.flow_fields_output / cfg.cases_subdir, cfg.tail_window,
+            force_coeffs_relpath=cfg.force_coeffs_relpath,
         )
+        dx = dy = 0.0
+    else:
+        dataset = AirfoilFlowDataset(PATHS.flow_fields_output)
+        with np.load(dataset.files[0], allow_pickle=False) as raw:
+            xy = raw["xy"]
+        dx = float(np.median(np.abs(np.diff(xy[:, :, 0], axis=1))[np.abs(np.diff(xy[:, :, 0], axis=1)) > 0]))
+        dy = float(np.median(np.abs(np.diff(xy[:, :, 1], axis=0))[np.abs(np.diff(xy[:, :, 1], axis=0)) > 0]))
 
-    # Save model weights after training is complete
-    torch.save(model.state_dict(), OUTPUT_PATH)
-    print(f"[INFO] Saved model to: {OUTPUT_PATH}")
+    case_ids = case_ids_for(dataset, model_name)
+    model_root = PATHS.project_root / ML_CFG.output.models_subdir / model_name
+    output_dir = model_root / "smoke_test" if args.smoke_test else model_root
+    fixed_split_path = model_root / "fixed_test_split.json"
+    split_existed = fixed_split_path.exists()
+    split = load_or_create_fixed_test_split(
+        case_ids, fixed_split_path, split_cfg.test_fraction,
+        split_cfg.seed,
+        regenerate_on_dataset_change=(
+            args.regenerate_split or split_cfg.regenerate_on_dataset_change
+        ),
+    )
+    if args.regenerate_split and split_existed:
+        print(f"[WARN] Fixed test split was explicitly regenerated: {fixed_split_path}")
+    folds = (
+        build_cv_folds(split.development_indices, case_ids, n_folds, split_cfg.seed, cv_strategy)
+        if cv_enabled else [build_holdout_fold(
+            split.development_indices, case_ids, ML_CFG.training.validation_split,
+            split_cfg.seed,
+        )]
+    )
+    configurations = generate_search_configurations(
+        search_strategy, base_hyperparameters(model_name),
+        search_space=search_cfg.search_space,
+        manual_coarse_configs=search_cfg.manual_coarse_configs,
+        n_iter=n_iter, seed=search_cfg.seed,
+    )
+    if args.smoke_test:
+        configurations = configurations[:2]
 
-    # Plot and save the train/val loss curves
-    plot_path = OUTPUT_PATH.with_name(OUTPUT_PATH.stem + "_loss_curves.png")
-    plot_loss_curves(train_history, val_history, plot_path)
+    def run_fold(hp: Mapping[str, Any], fold: Any) -> Mapping[str, float]:
+        fold_seed = split_cfg.seed + fold.fold_id
+        print(
+            f"[INFO] Fold {fold.fold_id}: normalization fitted from "
+            f"{len(fold.train_indices)} train cases; validation cases={len(fold.val_indices)}"
+        )
+        print(
+            f"[INFO] Fold {fold.fold_id} train ID preview: {fold.train_case_ids[:5]}"
+        )
+        print(
+            f"[INFO] Fold {fold.fold_id} validation ID preview: {fold.val_case_ids[:5]}"
+        )
+        if fold.validation_group_ids:
+            print(f"[INFO] Fold {fold.fold_id} validation NACA groups: {fold.validation_group_ids}")
+        if model_name == "clcd_mlp":
+            return train_clcd(dataset, fold.train_indices, fold.val_indices, hp, device,
+                              fold_seed, epochs)[1]
+        return train_field(dataset, model_name, fold.train_indices, fold.val_indices,
+                           hp, device, fold_seed, dx, dy, epochs)[1]
+
+    if mode == "single_run":
+        validation_metrics = dict(run_fold(configurations[0].hyperparameters, folds[0]))
+        cv_results = [{
+            "config_id": configurations[0].config_id,
+            "hyperparameters": configurations[0].hyperparameters,
+            "fold_metrics": [{"fold_id": 1, **validation_metrics}],
+            "mean_cv_metric": validation_metrics["objective"],
+            "std_cv_metric": 0.0,
+        }]
+        best = {
+            "config_id": configurations[0].config_id,
+            "hyperparameters": configurations[0].hyperparameters,
+            "fold_metrics": cv_results[0]["fold_metrics"],
+            "mean_cv_metric": validation_metrics["objective"],
+            "std_cv_metric": 0.0,
+        }
+    else:
+        cv_results, best = run_cross_validation(configurations, folds, run_fold)
+    best_hp = best["hyperparameters"]
+    final_seed = split_cfg.seed + 10000
+    print(
+        f"[INFO] Final normalization fitted from all {len(split.development_indices)} "
+        f"development cases; fixed test cases excluded={len(split.test_indices)}"
+    )
+    if model_name == "clcd_mlp":
+        final_model, test_metrics = train_clcd(
+            dataset, split.development_indices, split.test_indices, best_hp, device,
+            final_seed, epochs,
+        )
+    else:
+        final_model, test_metrics = train_field(
+            dataset, model_name, split.development_indices, split.test_indices,
+            best_hp, device, final_seed, dx, dy, epochs,
+        )
+    checkpoint = {
+        "model_name": model_name,
+        "model_state_dict": final_model.state_dict(),
+        "model_config": model_kwargs(model_name, best_hp),
+        **normalization_metadata(dataset, model_name),
+        "dataset_size": len(case_ids),
+        "dataset_fingerprint": split.dataset_fingerprint,
+        "development_case_ids": split.development_case_ids,
+        "test_case_ids": split.test_case_ids,
+        "cv_strategy": cv_strategy,
+        "n_folds": len(folds),
+        "best_hyperparameters": best_hp,
+        "split_seed": split.seed,
+        "hyperparameter_search_strategy": search_strategy,
+        "cv_enabled": cv_enabled,
+        "experiment_mode": mode,
+        "smoke_test": bool(args.smoke_test),
+    }
+    output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = output_dir / ML_CFG.output.filename_template.format(model_name=model_name)
+    torch.save(checkpoint, checkpoint_path)
+    test_payload = {"split": "test", "used_for_model_selection": False, **test_metrics}
+    write_experiment_results(
+        output_dir, model_name=model_name, split=split, folds=folds,
+        cv_strategy=cv_strategy, search_strategy=search_strategy,
+        sampled_configurations=configurations, cv_results=cv_results, best=best,
+        final_test_metrics=test_payload,
+    )
+    print(json.dumps({"checkpoint": str(checkpoint_path), "best": best,
+                      "final_test_metrics": test_payload}, indent=2))
 
 
 if __name__ == "__main__":

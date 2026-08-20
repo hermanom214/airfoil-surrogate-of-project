@@ -8,6 +8,7 @@ from typing import Any, cast
 import numpy as np
 import pandas as pd
 import torch
+from torch.utils.data import Subset
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
@@ -50,7 +51,10 @@ def run_validation() -> None:
     data_dir = paths.flow_fields_output
     model_name = ml_cfg.model.name
     model_filename = ml_cfg.output.filename_template.format(model_name=model_name)
-    model_path = paths.project_root / ml_cfg.output.models_subdir / model_filename
+    model_path = paths.project_root / ml_cfg.output.models_subdir / model_name / model_filename
+    legacy_model_path = paths.project_root / ml_cfg.output.models_subdir / model_filename
+    if not model_path.exists() and legacy_model_path.exists():
+        model_path = legacy_model_path
 
     validation_root = paths.project_root / ml_cfg.output.models_subdir / f"{model_name}_validation"
     metrics_dir = validation_root / "metrics"
@@ -68,37 +72,48 @@ def run_validation() -> None:
     if len(dataset) == 0:
         raise RuntimeError(f"Dataset is empty in: {data_dir}")
 
-    split = build_train_val_split(
-        dataset=dataset,
-        validation_split=ml_cfg.training.validation_split,
-        split_seed=ml_cfg.training.split_seed,
-    )
-    val_set = split.val_set
-    train_indices = split.train_indices
-    train_size = split.train_size
-    val_size = split.val_size
-    dataset.fit_condition_normalization(train_indices)
-    dataset.fit_target_normalization(train_indices)
+    try:
+        loaded = torch.load(model_path, map_location="cpu", weights_only=False)
+    except TypeError:
+        loaded = torch.load(model_path, map_location="cpu")
+    checkpoint = loaded if isinstance(loaded, dict) and "model_state_dict" in loaded else None
+    if checkpoint and checkpoint.get("test_case_ids"):
+        case_ids = [path.parent.name for path in dataset.files]
+        id_to_idx = {case_id: idx for idx, case_id in enumerate(case_ids)}
+        missing = [case_id for case_id in checkpoint["test_case_ids"] if case_id not in id_to_idx]
+        if missing:
+            raise RuntimeError(f"Saved test cases are missing from dataset: {missing}")
+        val_indices = [id_to_idx[case_id] for case_id in checkpoint["test_case_ids"]]
+        val_set = Subset(dataset, val_indices)
+        train_size = len(checkpoint.get("development_case_ids", []))
+        val_size = len(val_indices)
+        for key in ("aoa_mean", "aoa_std", "inlet_u_mean", "inlet_u_std", "p_mean",
+                    "p_std", "ux_mean", "ux_std", "uy_mean", "uy_std"):
+            setattr(dataset, key, float(checkpoint[key]))
+    else:
+        split = build_train_val_split(dataset, ml_cfg.training.validation_split,
+                                      ml_cfg.training.split_seed)
+        val_set = split.val_set
+        val_indices = split.val_indices
+        train_size, val_size = split.train_size, split.val_size
+        dataset.fit_condition_normalization(split.train_indices)
+        dataset.fit_target_normalization(split.train_indices)
 
     if len(val_set) == 0:
         raise RuntimeError("Validation set is empty after split.")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model_kwargs = evaluate_get_model_kwargs(model_name, ml_cfg)
+    model_kwargs = (checkpoint or {}).get("model_config") or evaluate_get_model_kwargs(model_name, ml_cfg)
     model = build_model(model_name, **model_kwargs).to(device)
 
     try:
-        state_dict = torch.load(
-            model_path,
-            map_location=device,
-            weights_only=True,
-        )
+        state_dict = (checkpoint or torch.load(model_path, map_location=device, weights_only=True))
     except TypeError:
         state_dict = torch.load(
             model_path,
             map_location=device,
         )
-    model.load_state_dict(state_dict)
+    model.load_state_dict(state_dict["model_state_dict"] if checkpoint else state_dict)
 
     model.eval()
     physics_available = model_name == "rans_pinn" and hasattr(model, "rans_residual_loss")
@@ -121,7 +136,7 @@ def run_validation() -> None:
 
     for local_idx in range(len(val_set)):
         try:
-            original_idx = split.val_indices[local_idx]
+            original_idx = val_indices[local_idx]
             npz_path = dataset.files[original_idx]
 
             inp, target_norm, _ = dataset[original_idx]
@@ -310,6 +325,7 @@ def run_validation() -> None:
 
         summary = {
             "model_name": model_name,
+            "evaluation_split": "test" if checkpoint else "legacy_validation",
             "model_path": str(model_path),
             "data_dir": str(data_dir),
             "validation_case_count": int(len(metrics_df)),
@@ -349,6 +365,7 @@ def run_validation() -> None:
     else:
         summary = {
             "model_name": model_name,
+            "evaluation_split": "test" if checkpoint else "legacy_validation",
             "model_path": str(model_path),
             "data_dir": str(data_dir),
             "validation_case_count": 0,
