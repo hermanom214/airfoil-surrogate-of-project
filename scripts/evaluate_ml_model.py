@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -36,12 +37,13 @@ from src.evaluate_plotting import (
 from src.ml_data_split import build_train_val_split
 from src.ml_dataset import AirfoilFlowDataset, parse_case_params
 from src.ml_models import build_model
+from src.ml_device import log_device, resolve_device
 from src.ml_protocols import PhysicsLossModel
 from src.ml_training import compute_grid_spacing_from_xy, masked_mse
 
 
 @torch.no_grad()
-def run_validation() -> None:
+def run_validation(device_requested: str | None = None) -> None:
     config_path = PROJECT_ROOT / "configs" / "paths.yaml"
     ml_config_path = PROJECT_ROOT / "configs" / "ml_models_config.yaml"
 
@@ -102,7 +104,9 @@ def run_validation() -> None:
     if len(val_set) == 0:
         raise RuntimeError("Validation set is empty after split.")
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    requested = device_requested or ml_cfg.device
+    device = resolve_device(requested)
+    log_device(requested, device)
     model_kwargs = (checkpoint or {}).get("model_config") or evaluate_get_model_kwargs(model_name, ml_cfg)
     model = build_model(model_name, **model_kwargs).to(device)
 
@@ -451,7 +455,10 @@ def run_validation() -> None:
 
 
 def main() -> None:
-    run_validation()
+    parser = argparse.ArgumentParser(description="Evaluate a trained flow-field model.")
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default=None)
+    args = parser.parse_args()
+    run_validation(args.device)
 
 
 if __name__ == "__main__":

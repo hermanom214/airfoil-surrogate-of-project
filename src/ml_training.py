@@ -38,14 +38,15 @@ def compute_grid_spacing_from_xy(xy: torch.Tensor) -> tuple[float, float]:
     return dx, dy
 
 
-def train_one_epoch(model, loader, optimizer, device: str) -> float:
+def train_one_epoch(model, loader, optimizer, device: torch.device) -> float:
     model.train()
     total_loss = 0.0
 
     for inp, target, mask in loader:
-        inp = inp.to(device)
-        target = target.to(device)
-        mask = mask.to(device)
+        non_blocking = device.type == "cuda"
+        inp = inp.to(device, non_blocking=non_blocking)
+        target = target.to(device, non_blocking=non_blocking)
+        mask = mask.to(device, non_blocking=non_blocking)
 
         pred = model(inp)
         loss = masked_mse(pred, target, mask)
@@ -60,14 +61,15 @@ def train_one_epoch(model, loader, optimizer, device: str) -> float:
 
 
 @torch.no_grad()
-def evaluate(model, loader, device: str) -> float:
+def evaluate(model, loader, device: torch.device) -> float:
     model.eval()
     total_loss = 0.0
 
     for inp, target, mask in loader:
-        inp = inp.to(device)
-        target = target.to(device)
-        mask = mask.to(device)
+        non_blocking = device.type == "cuda"
+        inp = inp.to(device, non_blocking=non_blocking)
+        target = target.to(device, non_blocking=non_blocking)
+        mask = mask.to(device, non_blocking=non_blocking)
 
         pred = model(inp)
         loss = masked_mse(pred, target, mask)
@@ -81,7 +83,7 @@ def train_one_epoch_physics(
     model,
     loader,
     optimizer,
-    device: str,
+    device: torch.device,
     dx: float,
     dy: float,
     nu: float,
@@ -111,9 +113,10 @@ def train_one_epoch_physics(
     }
 
     for inp, target, mask in loader:
-        inp = inp.to(device)
-        target = target.to(device)
-        mask = mask.to(device)
+        non_blocking = device.type == "cuda"
+        inp = inp.to(device, non_blocking=non_blocking)
+        target = target.to(device, non_blocking=non_blocking)
+        mask = mask.to(device, non_blocking=non_blocking)
 
         pred = model(inp)
 

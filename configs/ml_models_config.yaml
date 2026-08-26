@@ -1,3 +1,5 @@
+device: cuda # auto | cpu | cuda; cuda fails immediately when unavailable
+
 model:
   name: "simple_unet" # možnosti: "simple_unet" | "rans_pinn" | "clcd_mlp"
   params:
@@ -22,7 +24,7 @@ model:
 
 training:
   batch_size: 2 # rozumně 1–16 dle GPU RAM
-  epochs: 50 # rozumně 20–300 dle konvergence
+  epochs: 30 # rozumně 20–300 dle konvergence
   learning_rate: 0.001 # rozumně 1e-4 až 3e-3 (Adam)
   validation_split: 0.2 # rozumně 0.1–0.3
   split_seed: 42 # libovolné celé číslo pro reprodukovatelnost
@@ -51,16 +53,13 @@ experiments:
         dropout: [0.0, 0.1, 0.2]
         hidden_dims: [[32, 32], [64, 64], [128, 128, 64]]
   simple_unet:
-    data_split: {cv_enabled: false, n_folds: 3}
+    data_split: {cv_enabled: true, n_folds: 3}
     hyperparameter_search:
-      strategy: none
-      n_iter: 8
-      search_space:
-        learning_rate: [0.001, 0.0003, 0.0001]
-        batch_size: [1, 2, 4]
-        weight_decay: [0.0, 0.00001, 0.0001]
-        encoder_channels: [[16, 32, 64], [32, 64, 128]]
-        bottleneck_channels: [128, 256]
+      strategy: manual_coarse
+      manual_coarse_configs:
+        - {learning_rate: 0.001, batch_size: 2, weight_decay: 0.0, encoder_channels: [32, 64, 128], bottleneck_channels: 256}
+        - {learning_rate: 0.0003, batch_size: 2, weight_decay: 0.00001, encoder_channels: [32, 64, 128], bottleneck_channels: 256}
+        - {learning_rate: 0.0003, batch_size: 2, weight_decay: 0.00001, encoder_channels: [16, 32, 64], bottleneck_channels: 128}
   rans_pinn:
     data_split: {cv_enabled: false, n_folds: 3}
     hyperparameter_search:

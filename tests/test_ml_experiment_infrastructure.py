@@ -5,6 +5,7 @@ import warnings
 
 import numpy as np
 import pytest
+import torch
 
 from src.ml_data_split import (
     build_cv_folds,
@@ -13,10 +14,35 @@ from src.ml_data_split import (
     naca_group_from_case_id,
 )
 from src.ml_hyperparameter_search import generate_search_configurations
+from src.ml_device import resolve_device
 from src.ml_clcd_dataset import AirfoilClCdDataset
 from src.ml_dataset import AirfoilFlowDataset
 from src.ml_experiment import experiment_mode, run_cross_validation, write_experiment_results
 from scripts.train_ml_model import parse_args
+
+
+def test_device_cpu_always_resolves_to_cpu(monkeypatch) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert resolve_device("cpu").type == "cpu"
+
+
+def test_device_auto_falls_back_to_cpu_without_cuda(monkeypatch) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert resolve_device("auto").type == "cpu"
+
+
+def test_device_cuda_raises_without_cuda(monkeypatch) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(RuntimeError, match=r"torch.cuda.is_available\(\) is False"):
+        resolve_device("cuda")
+
+
+def test_checkpoint_loading_is_portable_via_map_location(tmp_path) -> None:
+    path = tmp_path / "checkpoint.pt"
+    model = torch.nn.Linear(2, 1)
+    torch.save({"model_state_dict": model.state_dict()}, path)
+    loaded = torch.load(path, map_location=torch.device("cpu"), weights_only=True)
+    assert all(tensor.device.type == "cpu" for tensor in loaded["model_state_dict"].values())
 
 
 def _ids() -> list[str]:
@@ -62,6 +88,12 @@ def test_explicit_regeneration_is_deterministic(tmp_path) -> None:
 def test_regenerate_split_cli_flag_is_explicit() -> None:
     args = parse_args(["--model", "simple_unet", "--regenerate-split"])
     assert args.regenerate_split is True
+
+
+def test_training_cli_accepts_device_and_epoch_override() -> None:
+    args = parse_args(["--model", "simple_unet", "--device", "cpu", "--epochs", "3"])
+    assert args.device == "cpu"
+    assert args.epochs == 3
 
 
 def test_training_mode_cli_flags_are_mutually_exclusive() -> None:

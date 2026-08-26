@@ -189,6 +189,7 @@ class MLOutputConfig:
 
 @dataclass
 class MLModelsConfig:
+    device: str
     model: MLModelConfig
     training: MLTrainingConfig
     physics_loss: MLPhysicsLossConfig
@@ -319,6 +320,9 @@ def load_ml_models_config(config_path: Path) -> MLModelsConfig:
     with config_path.open("r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
 
+    device = str(data.get("device", "auto")).strip().lower()
+    if device not in {"auto", "cpu", "cuda"}:
+        raise ValueError(f"Unsupported device: {device!r}; expected auto, cpu or cuda")
     model_data = data["model"]
     training_data = data["training"]
     physics_data = data["physics_loss"]
@@ -418,6 +422,7 @@ def load_ml_models_config(config_path: Path) -> MLModelsConfig:
     }
 
     return MLModelsConfig(
+        device=device,
         model=model,
         training=training,
         physics_loss=physics_loss,

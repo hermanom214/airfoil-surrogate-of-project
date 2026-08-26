@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from dataclasses import asdict
@@ -32,6 +33,7 @@ from src.evaluate_io import sanitize_for_json
 from src.evaluate_metrics import evaluate_summarize_numeric_columns
 from src.ml_clcd_dataset import AirfoilClCdDataset
 from src.ml_data_split import build_train_val_split
+from src.ml_device import log_device, resolve_device
 
 
 def _to_int_list(values: Any) -> list[int]:
@@ -105,7 +107,7 @@ def _pick_validation_indices(
 
 
 @torch.no_grad()
-def run_clcd_validation() -> None:
+def run_clcd_validation(device_requested: str | None = None) -> None:
     config_path = PROJECT_ROOT / "configs" / "paths.yaml"
     ml_config_path = PROJECT_ROOT / "configs" / "ml_models_config.yaml"
 
@@ -144,9 +146,12 @@ def run_clcd_validation() -> None:
     if len(dataset) == 0:
         raise RuntimeError(f"Cl/Cd dataset is empty in: {cases_root}")
 
+    requested = device_requested or ml_cfg.device
+    device = resolve_device(requested)
+    log_device(requested, device)
     model = build_clcd_model_from_checkpoint(
         checkpoint=checkpoint,
-        device="cuda" if torch.cuda.is_available() else "cpu",
+        device=device,
         fallback_model_config=asdict(ml_cfg.model.params.clcd_mlp),
     )
 
@@ -287,7 +292,10 @@ def run_clcd_validation() -> None:
 
 
 def main() -> None:
-    run_clcd_validation()
+    parser = argparse.ArgumentParser(description="Evaluate a trained Cl/Cd model.")
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default=None)
+    args = parser.parse_args()
+    run_clcd_validation(args.device)
 
 
 if __name__ == "__main__":

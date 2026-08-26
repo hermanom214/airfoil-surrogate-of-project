@@ -27,6 +27,7 @@ from src.ml_dataset import AirfoilFlowDataset
 from src.ml_experiment import experiment_mode, run_cross_validation, write_experiment_results
 from src.ml_hyperparameter_search import generate_search_configurations
 from src.ml_models import AVAILABLE_MODELS, build_model
+from src.ml_device import loader_device_kwargs, log_device, resolve_device
 from src.ml_training import evaluate, train_one_epoch, train_one_epoch_physics
 
 
@@ -38,6 +39,11 @@ ML_CFG = load_ml_models_config(ROOT / "configs" / "ml_models_config.yaml")
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", choices=AVAILABLE_MODELS, default=ML_CFG.model.name)
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default=ML_CFG.device)
+    parser.add_argument(
+        "--epochs", type=int, default=None,
+        help="Override training.epochs (useful for matched CPU/CUDA benchmarks).",
+    )
     parser.add_argument("--cv-strategy", choices=("kfold", "group_kfold_naca"))
     parser.add_argument("--search-strategy", choices=("none", "randomized", "manual_coarse"))
     mode_group = parser.add_mutually_exclusive_group()
@@ -126,14 +132,17 @@ def base_hyperparameters(model_name: str) -> dict[str, Any]:
 
 
 def train_clcd(dataset: AirfoilClCdDataset, train_indices: Sequence[int],
-               eval_indices: Sequence[int], hp: Mapping[str, Any], device: str,
+               eval_indices: Sequence[int], hp: Mapping[str, Any], device: torch.device,
                seed: int, epochs: int) -> tuple[torch.nn.Module, dict[str, float]]:
     seed_everything(seed)
     fit_normalization(dataset, "clcd_mlp", train_indices)
     batch = int(hp["batch_size"])
+    loader_kwargs = loader_device_kwargs(device)
     train_loader = DataLoader(Subset(dataset, list(train_indices)), batch_size=batch,
-                              shuffle=True, generator=torch.Generator().manual_seed(seed))
-    eval_loader = DataLoader(Subset(dataset, list(eval_indices)), batch_size=batch, shuffle=False)
+                              shuffle=True, generator=torch.Generator().manual_seed(seed),
+                              **loader_kwargs)
+    eval_loader = DataLoader(Subset(dataset, list(eval_indices)), batch_size=batch, shuffle=False,
+                             **loader_kwargs)
     model = build_model("clcd_mlp", **model_kwargs("clcd_mlp", hp)).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=float(hp["learning_rate"]),
                                  weight_decay=float(hp.get("weight_decay", 0.0)))
@@ -141,7 +150,10 @@ def train_clcd(dataset: AirfoilClCdDataset, train_indices: Sequence[int],
     for _ in range(epochs):
         model.train()
         for features, targets in train_loader:
-            loss = criterion(model(features.to(device)), targets.to(device))
+            non_blocking = device.type == "cuda"
+            features = features.to(device, non_blocking=non_blocking)
+            targets = targets.to(device, non_blocking=non_blocking)
+            loss = criterion(model(features), targets)
             if not torch.isfinite(loss):
                 raise RuntimeError("Non-finite Cl/Cd training loss")
             optimizer.zero_grad(); loss.backward(); optimizer.step()
@@ -151,7 +163,7 @@ def train_clcd(dataset: AirfoilClCdDataset, train_indices: Sequence[int],
     predictions: list[np.ndarray] = []
     with torch.no_grad():
         for features, targets in eval_loader:
-            pred = model(features.to(device)).cpu()
+            pred = model(features.to(device, non_blocking=device.type == "cuda")).detach().cpu()
             losses.append(float(criterion(pred, targets).item()))
             truths.append(targets.numpy() * dataset.target_std + dataset.target_mean)
             predictions.append(pred.numpy() * dataset.target_std + dataset.target_mean)
@@ -168,14 +180,17 @@ def train_clcd(dataset: AirfoilClCdDataset, train_indices: Sequence[int],
 
 def train_field(dataset: AirfoilFlowDataset, model_name: str,
                 train_indices: Sequence[int], eval_indices: Sequence[int],
-                hp: Mapping[str, Any], device: str, seed: int,
+                hp: Mapping[str, Any], device: torch.device, seed: int,
                 dx: float, dy: float, epochs: int) -> tuple[torch.nn.Module, dict[str, float]]:
     seed_everything(seed)
     fit_normalization(dataset, model_name, train_indices)
     batch = int(hp["batch_size"])
+    loader_kwargs = loader_device_kwargs(device)
     train_loader = DataLoader(Subset(dataset, list(train_indices)), batch_size=batch,
-                              shuffle=True, generator=torch.Generator().manual_seed(seed))
-    eval_loader = DataLoader(Subset(dataset, list(eval_indices)), batch_size=batch, shuffle=False)
+                              shuffle=True, generator=torch.Generator().manual_seed(seed),
+                              **loader_kwargs)
+    eval_loader = DataLoader(Subset(dataset, list(eval_indices)), batch_size=batch, shuffle=False,
+                             **loader_kwargs)
     model = build_model(model_name, **model_kwargs(model_name, hp)).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=float(hp["learning_rate"]),
                                  weight_decay=float(hp.get("weight_decay", 0.0)))
@@ -199,6 +214,8 @@ def train_field(dataset: AirfoilFlowDataset, model_name: str,
 
 def main() -> None:
     args = parse_args()
+    if args.epochs is not None and args.epochs <= 0:
+        raise ValueError("--epochs must be a positive integer")
     model_name = args.model
     experiment = ML_CFG.experiment_for(model_name)
     split_cfg = experiment.data_split
@@ -209,10 +226,12 @@ def main() -> None:
         True if args.cross_validation else False if args.single_run else split_cfg.cv_enabled
     )
     mode = experiment_mode(cv_enabled, search_strategy)
-    epochs = min(2, ML_CFG.training.epochs) if args.smoke_test else ML_CFG.training.epochs
+    configured_epochs = args.epochs if args.epochs is not None else ML_CFG.training.epochs
+    epochs = min(2, configured_epochs) if args.smoke_test else configured_epochs
     n_folds = min(2, split_cfg.n_folds) if args.smoke_test else split_cfg.n_folds
     n_iter = min(2, search_cfg.n_iter) if args.smoke_test else search_cfg.n_iter
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = resolve_device(args.device)
+    log_device(args.device, device)
     seed_everything(split_cfg.seed)
 
     if model_name == "clcd_mlp":
@@ -330,6 +349,11 @@ def main() -> None:
         "cv_enabled": cv_enabled,
         "experiment_mode": mode,
         "smoke_test": bool(args.smoke_test),
+        "training_epochs": epochs,
+        "runtime_device_requested": args.device,
+        "runtime_device_selected": device.type,
+        "pytorch_version": torch.__version__,
+        "cuda_runtime_version": torch.version.cuda,
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = output_dir / ML_CFG.output.filename_template.format(model_name=model_name)
