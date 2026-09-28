@@ -1,194 +1,87 @@
-# ML Model and Training
+# ML Models and Reproducible Training
 
-## Active training script
+## Modely
 
-- [scripts/train_ml_model.py](../scripts/train_ml_model.py)
+| Model | Vstup | Výstup | Účel |
+|---|---|---|---|
+| `simple_unet` | `(B, 5, H, W)` | `(B, 3, H, W)` | baseline pro `[p, Ux, Uy]` |
+| `rans_pinn` | `(B, 5, H, W)` | `(B, 3, H, W)` | convolutional model s data + PDE residual loss |
+| `clcd_mlp` | `(B, 5)` | `(B, 2)` | regrese `[Cl, Cd]` |
 
-## Supported model families
+Architektury jsou v [src/ml_models.py](../src/ml_models.py). Spatial output channel order je vždy `[p, Ux, Uy]`.
 
-- `simple_unet`
-- `rans_pinn`
-- `clcd_mlp`
+`simple_unet` je encoder-decoder se skip connections. `rans_pinn` je fully convolutional síť a během tréninku přidává maskované continuity/momentum residuals po nakonfigurovaném warmupu. `clcd_mlp` je plně propojená síť s konfigurovatelnými hidden layers a dropoutem.
 
-Defined in [src/ml_models.py](../src/ml_models.py).
+## Datasety a filtrování
 
-## Architecture snapshot
+[src/ml_dataset.py](../src/ml_dataset.py) hledá `flow_fields_output/*/*.npz`. [src/ml_clcd_dataset.py](../src/ml_clcd_dataset.py) hledá `flow_fields_output/case_*` a v nich nakonfigurovaný `forceCoeffs.dat`.
 
-Spatial models use the same dataset interface:
-- input tensor shape: `(B, 5, H, W)`
-- output tensor shape: `(B, 3, H, W)`
-- output channels represent `(p, Ux, Uy)` in normalized form.
+Scalar feature order:
 
-### 1) `simple_unet` (encoder-decoder with skip connections)
-
-Implementation: [src/ml_models.py](../src/ml_models.py), class `SimpleUNet`
-
-Main structure:
-- encoder: three convolutional stages (`enc1`, `enc2`, `enc3`) with `Conv(3x3)+ReLU` blocks
-- downsampling: `MaxPool2d(2)` between encoder stages
-- bottleneck: deeper convolutional block at lowest spatial resolution
-- decoder: transposed-convolution upsampling (`up3`, `up2`, `up1`)
-- skip connections: concatenation with encoder features at matching scale
-- head: final `1x1` convolution to 3 output channels
-
-Configurable parameters (from [configs/ml_models_config.yaml](../configs/ml_models_config.yaml)):
-- `in_channels`, `out_channels`
-- `encoder_channels` (default `[32, 64, 128]`)
-- `bottleneck_channels` (default `256`)
-
-Use case:
-- strong baseline for dense field regression when data fidelity is primary.
-
-### 2) `rans_pinn` (physics-informed convolutional network)
-
-Implementation: [src/ml_models.py](../src/ml_models.py), class `PhysicsInformedCNN`
-
-Main structure:
-- plain fully-convolutional stack (no pooling, no skip paths)
-- first layer: `Conv(3x3)` from input channels to `hidden_channels`
-- hidden trunk: repeated `Conv(3x3)+Tanh` blocks (`depth` controls count)
-- output layer: final `Conv(3x3)` to 3 channels
-
-Physics-informed component:
-- model provides `rans_residual_loss(...)` for continuity + momentum residuals
-- spatial derivatives are computed with finite-difference-like operators (`_ddx`, `_ddy`, `_laplacian`)
-- residual loss is masked to fluid cells and mixed with data loss during training
-
-Configurable parameters:
-- `in_channels`, `out_channels`
-- `hidden_channels` (default `128`)
-- `depth` (default `6`)
-
-Use case:
-- preferred when enforcing PDE consistency together with supervised data fit.
-
-### 3) `clcd_mlp` (scalar regressor for aerodynamic coefficients)
-
-Implementation: [src/ml_models.py](../src/ml_models.py), class `ClCdMLP`
-
-Input feature order:
-- `camber_percent`
-- `camber_position_tenths`
-- `thickness_percent`
-- `aoa_deg`
-- `inlet_velocity`
-
-Target order:
-- `Cl`
-- `Cd`
-
-Configurable parameters:
-- `input_dim`, `hidden_dims`, `output_dim`, `dropout`
-
-Use case:
-- rapid scalar prediction of aerodynamic coefficients without reconstructing full flow fields.
-
-## Config-driven ML setup
-
-All ML-related hardcoded parameters were moved to:
-- [configs/ml_models_config.yaml](../configs/ml_models_config.yaml)
-
-This includes:
-- selected model name
-- model architecture parameters
-- training hyperparameters
-- physics-loss parameters
-- output naming/path template
-
-Loader and dataclasses:
-- [src/config.py](../src/config.py) (`load_ml_models_config`)
-
-## Dataset interface
-
-- dataset class: [src/ml_dataset.py](../src/ml_dataset.py)
-- expected sample format: `*_flow.npz`
-- target channels: pressure + velocity components (`p`, `Ux`, `Uy`)
-
-Scalar Cl/Cd dataset interface:
-
-- dataset class: [src/ml_clcd_dataset.py](../src/ml_clcd_dataset.py)
-- source: OpenFOAM case folders + `forceCoeffs.dat`
-- robust parsing:
-	- parse `Time`, `Cd`, `Cl` columns
-	- finite-only row filtering
-	- minimum valid iteration threshold
-	- finite-check of tail averages
-	- tracked skip reasons per case
-- safe normalization:
-	- finite checks before statistics
-	- finite checks of statistics
-	- lower bound on std
-
-## Training loop components
-
-- masked data loss and evaluation: [src/ml_training.py](../src/ml_training.py)
-- physics-informed residual loss: in model implementation ([src/ml_models.py](../src/ml_models.py))
-- loss curve plotting: [src/ml_validation.py](../src/ml_validation.py)
-
-For `clcd_mlp` training path in [scripts/train_ml_model.py](../scripts/train_ml_model.py):
-
-- non-finite training and validation loss detection (`torch.isfinite`)
-- refusal to save model on non-finite `train_history`/`val_history`
-- checkpoint dictionary save (not only raw state dict)
-- checkpoint includes normalization stats, feature/target order, and split metadata
-
-## Typical execution
-
-```bash
-python -m scripts.train_ml_model
+```text
+camber_percent, camber_position_tenths, thickness_percent, aoa_deg, inlet_velocity
 ```
 
-Model weights and plots are written according to `output.*` in [configs/ml_models_config.yaml](../configs/ml_models_config.yaml).
+Scalar target order je `Cl, Cd`. Parser vynechává nečíselné a non-finite řádky, požaduje nejméně 100 validních řádků a zprůměruje posledních `tail_window` řádků (aktuálně 200). Oba datasety vynechávají cases označené jako nevyhovující v inspection výsledcích.
 
-## Evaluation
+## Experiment protocol
 
-Spatial branch (`simple_unet`, `rans_pinn`):
+[scripts/train_ml_model.py](../scripts/train_ml_model.py) používá stejný protokol pro všechny modely:
 
-```bash
-python -m scripts.evaluate_ml_model
+1. načte dataset a jeho stabilní case ID;
+2. vytvoří nebo načte `fixed_test_split.json`;
+3. test cases úplně vyřadí z výběru modelu;
+4. na development části provede holdout nebo CV;
+5. normalizaci fituje zvlášť pouze na training indices každého foldu;
+6. vybere nejlepší hyperparametry podle validačního objective;
+7. finální model trénuje na celé development části s nově fitovanou normalizací;
+8. spočítá finální metriky na fixed test setu a uloží checkpoint.
+
+Strategie `none` vypíná hledání hyperparametrů, nikoli automaticky CV. CV řídí model-specific `experiments.<model>.data_split.cv_enabled` nebo CLI přepínače. `--single-run` explicitně vypíná CV a vyžaduje search strategy `none`.
+
+Podporované strategie:
+
+- split/CV: `kfold`, `group_kfold_naca`;
+- search: `none`, `randomized`, `manual_coarse`.
+
+Pokud se změní dataset fingerprint, existující fixed split se automaticky nepřepíše. Novou test populaci lze vytvořit pouze pomocí `--regenerate-split` nebo odpovídajícího config flagu.
+
+## CLI
+
+```powershell
+python -m scripts.train_ml_model --model simple_unet
+python -m scripts.train_ml_model --model rans_pinn --device cuda
+python -m scripts.train_ml_model --model clcd_mlp --device cpu
+python -m scripts.train_ml_model --model simple_unet --cv-strategy group_kfold_naca
+python -m scripts.train_ml_model --model simple_unet --cross-validation
+python -m scripts.train_ml_model --model rans_pinn --search-strategy none --single-run
+python -m scripts.train_ml_model --model simple_unet --epochs 3 --smoke-test
+python -m scripts.train_ml_model --model simple_unet --regenerate-split
 ```
 
-Scalar branch (`clcd_mlp`):
+`--device auto|cpu|cuda` přepisuje config. Explicitní `cuda` skončí chybou, pokud CUDA není dostupná. `--smoke-test` omezuje běh na 2 epochy, nejvýše 2 kandidáty a 2 folds; stále ale projde stejným split/training protokolem.
 
-```bash
-python -m scripts.evaluate_clcd_model
+## Artefakty
+
+Produkční běh zapisuje do `data/models/<model_name>/`, smoke běh do `data/models/<model_name>/smoke_test/`:
+
+- `<model_name>_airfoil.pt`;
+- `split_metadata.json`;
+- `cv_results.json`;
+- `hyperparameter_search_results.csv`;
+- `final_test_metrics.json`.
+
+Perzistentní `fixed_test_split.json` zůstává v kořeni modelu i pro smoke běh. Checkpoint obsahuje model state/config, normalizační statistiky, dataset fingerprint, development/test case IDs, nejlepší hyperparametry, experiment mode, seed/device a runtime verze.
+
+## Evaluace
+
+```powershell
+python -m scripts.evaluate_ml_model --device auto
+python -m scripts.evaluate_clcd_model --device auto
 ```
 
-Scalar evaluation outputs:
+Spatial evaluace načte model vybraný v `model.name`; je určena jen pro `simple_unet` a `rans_pinn`. Výstupy ukládá do `data/models/<model_name>_validation/` jako per-case CSV, summary JSON, dataset error plot a per-case field/velocity obrázky.
 
-- metrics CSV and summary JSON in `data/models/clcd_mlp_validation/metrics`
-- plots in `data/models/clcd_mlp_validation/figures`
-- global metrics are reported separately for Cl and Cd (MAE, RMSE, Bias, MedAE, MaxAE, R2)
+Cl/Cd evaluace vždy používá `clcd_mlp` checkpoint a zapisuje per-case CSV, summary JSON a Cl/Cd scatter, residual a sorted-error grafy do `data/models/clcd_mlp_validation/`.
 
-Reusable scalar inference API is in [src/clcd_inference.py](../src/clcd_inference.py),
-designed for evaluation, future GUI, REST API, and standalone predictions.
-
-## Reproducible experiments
-
-Training now reserves a persisted 20% fixed test set before tuning. The remaining
-development cases use seeded K-fold or NACA-group-held-out CV. Normalization is
-refit on each fold's training cases and, for the final model, on all development
-cases; test cases never contribute statistics or model selection.
-
-```bash
-python scripts/train_ml_model.py --model clcd_mlp
-python scripts/train_ml_model.py --model clcd_mlp --cv-strategy group_kfold_naca
-python scripts/train_ml_model.py --model simple_unet
-python scripts/train_ml_model.py --model simple_unet --cv-strategy group_kfold_naca
-python scripts/train_ml_model.py --model rans_pinn
-python scripts/train_ml_model.py --model rans_pinn --search-strategy none  # CV, no search
-python scripts/train_ml_model.py --model rans_pinn --search-strategy none --single-run
-python scripts/train_ml_model.py --model simple_unet --smoke-test
-python scripts/train_ml_model.py --model simple_unet --regenerate-split
-```
-
-Split, CV, search, checkpoint, and final-test artifacts are written below
-`data/models/<model_name>/`. Search spaces and per-model defaults are defined in
-`configs/ml_models_config.yaml`.
-
-`hyperparameter_search.strategy: none` disables only search. CV remains controlled
-independently by `data_split.cv_enabled`; `--single-run` explicitly disables CV.
-An incompatible persisted dataset fingerprint stops training. Replacing its fixed
-test population requires the explicit `--regenerate-split` flag. Smoke artifacts
-are isolated under `data/models/<model_name>/smoke_test/` and do not overwrite a
-production checkpoint or production CV results.
+U nových checkpointů označuje název adresáře historicky „validation“, ale skutečný `evaluation_split` je fixed test set. Staré checkpointy bez `test_case_ids` používají uloženou nebo znovu sestavenou legacy validation část.

@@ -1,68 +1,47 @@
-# Project Plan (Current Branch)
+# Project Status and Plan
 
-## Goal
+## Hotovo
 
-Deliver a stable and reproducible end-to-end workflow:
-- blockMesh-based CFD case generation,
-- OpenFOAM run automation,
-- flow-field export to NPZ,
-- surrogate-model training from config-driven settings.
+- procedurální blockMesh-only C-grid pipeline;
+- config-driven sampling, mesh build a OpenFOAM runner;
+- per-case divergence guard, logy, VTK conversion, archivace a cleanup;
+- extrakce polí na pravidelnou mřížku a dataset QA;
+- spatial modely `simple_unet`, `rans_pinn` a scalar `clcd_mlp`;
+- jednotný fixed-test experiment protocol;
+- holdout nebo K-fold/NACA-group CV;
+- randomized/manual coarse hyperparameter search;
+- training-only normalizace bez leakage z validation/test dat;
+- oddělené checkpointy a metadata pro každý model;
+- evaluace fixed test setu pro spatial i Cl/Cd větev;
+- CPU/CUDA device selection a izolovaný smoke-test output.
 
-## Current Status
+## Aktuální omezení
 
-### Done
+- absolutní Windows/OpenFOAM cesty v `paths.yaml` musí odpovídat lokálnímu checkoutu;
+- build skript vždy regeneruje celou sampling table a smaže předchozí case adresáře;
+- build a CFD runner nemají malý subset/smoke režim;
+- extraction grid a počet extraction workers jsou hardcoded ve skriptu;
+- case archivace nepřepisuje existující `data/flow_fields/<case_id>`;
+- `run_status.csv` leží v simulačním kořeni, ze kterého se úspěšné cases průběžně odstraňují;
+- názvy evaluation adresářů používají suffix `_validation`, i když nové checkpointy vyhodnocují fixed test set;
+- některé starší pomocné moduly a komentáře zůstávají kvůli kompatibilitě.
 
-- migrated to blockMesh-only pipeline (legacy STL/snappy branch is inactive)
-- centralized key runtime/build/training settings into YAML configs
-- refactored core modules (`case_builder`, `case_runner`, `flow_extractor`, `sampling`, `config`)
-- implemented config-driven ML training with selectable model family (`simple_unet`, `rans_pinn`, `clcd_mlp`)
-- implemented robust scalar Cl/Cd training safeguards:
-	- finite-only `forceCoeffs.dat` parsing,
-	- minimum valid iterations,
-	- case skip tracking with reasons,
-	- strict finite checks for normalization and training loss,
-	- corruption-safe checkpoint saving
-- implemented parallel scalar evaluation workflow:
-	- [scripts/evaluate_clcd_model.py](../scripts/evaluate_clcd_model.py)
-	- [src/clcd_inference.py](../src/clcd_inference.py)
-	- [src/evaluate_clcd_metrics.py](../src/evaluate_clcd_metrics.py)
-	- [src/evaluate_clcd_plotting.py](../src/evaluate_clcd_plotting.py)
-- kept existing U-Net/PINN evaluation workflow intact
-- reduced CFD disk usage:
-  - `processor*` folders are auto-removed after each finished case
-  - compressed binary write in `controlDict` + `purgeWrite 1`
-- refreshed technical docs for overview, pipeline, CFD setup, mesh setup, and ML models
+## Doporučené další kroky
 
-### In Progress
+1. Přidat validační preflight pro cesty, YAML hodnoty, šablonu a dostupnost OpenFOAM/CUDA.
+2. Přidat bezpečný `--case-id`, `--limit` nebo manifest subset režim pro build/run/extract.
+3. Přesunout extraction grid, workers a divergence thresholds do konfigurace.
+4. Přidat explicitní politiku `--overwrite/--resume` pro case archiv a NPZ.
+5. Vytvořit jeden end-to-end smoke test od build přes CFD až po evaluaci.
+6. Ukládat snapshot všech použitých konfigurací ke každému experimentu.
+7. Sjednotit názvy test/evaluation výstupů a zachovat čtení legacy cest.
+8. Dále kalibrovat mesh robustnost a physics-loss váhu na reprezentativních cases.
+9. Rozpracovat PINN model
 
-- mesh-quality and wake-length tuning for robust convergence across all sampled cases
-- full-sweep stability checks (failure rate, convergence consistency)
-- iterative calibration of physics-loss contribution for `rans_pinn`
-- collection of larger, cleaner CFD sample pool for stronger `clcd_mlp` generalization
+## Provozní pravidla
 
-## Next Steps (Priority)
-
-1. Add config validation (schema + sanity bounds) before running build/train scripts.
-2. Add a smoke-test mode for a very small subset (`build -> run -> extract -> train -> evaluate`).
-3. Add automatic run report after CFD stage:
-	- success/fail counts,
-	- runtime distribution,
-	- simple convergence summary from logs.
-4. Add NPZ dataset QA checks:
-	- NaN/Inf scan,
-	- shape consistency,
-	- basic physical range checks.
-5. Add unified experiment registry for both spatial and scalar branches.
-6. Version experiments by saving config snapshots with each model artifact.
-
-## Risks
-
-- environment/path mismatch between Windows host and OpenFOAM runtime
-- mesh-parameter changes can degrade stability for part of the case sweep
-- full parameter sweeps can be expensive in compute time and storage
-
-## Working Rules
-
-- keep workflow changes config-first whenever possible (minimize hardcoded switches)
-- track every experiment with explicit config version + output artifacts
-- keep a small regression subset (1-3 representative cases) as a pre-check gate
+- Před buildem zazálohovat nebo přesunout ručně cenné cases ze spravovaných `blockmesh_cases` kořenů.
+- Před opakovaným CFD během rozhodnout, zda zachovat, přesunout nebo odstranit existující cílový case archiv.
+- Po CFD zkontrolovat `run_status.csv`, logy a inspection výsledky před tréninkem.
+- Neměnit fixed test split uprostřed série porovnávaných experimentů.
+- Pro rychlou kontrolu ML použít `--smoke-test`; výsledky nepovažovat za produkční benchmark.

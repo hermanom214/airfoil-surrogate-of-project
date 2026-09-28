@@ -1,145 +1,69 @@
 # CFD Workflow (OpenFOAM)
 
-## Active CFD chain per case
+## Solver chain
+
+Aktuální řetězec jednoho case je:
 
 1. `blockMesh`
 2. `checkMesh`
 3. `decomposePar -force`
 4. `simpleFoam -parallel`
 5. `reconstructPar -latestTime`
+6. `foamToVTK -latestTime -ascii -fields '(p U)'`
+7. archivace vybraných výsledků
+8. odstranění úspěšného pracovního case
 
-These steps are defined in [configs/solver_config.yaml](../configs/solver_config.yaml) under `case_runner.run_steps`.
+Prvních pět kroků a `foamToVTK` jsou v [configs/solver_config.yaml](../configs/solver_config.yaml). Implementace, divergence guard, archivace a cleanup jsou v [src/case_runner.py](../src/case_runner.py).
 
-Besides field outputs (`p`, `U`) used by spatial surrogate models,
-the CFD workflow also provides force-coefficient history (`forceCoeffs.dat`) used by
-the scalar `clcd_mlp` training/evaluation branch.
+## Spuštění
 
-## CFD base case setup (manual-style summary)
+```powershell
+python -m scripts.run_cases
+python -m scripts.run_cases --start-case-id 30
+```
 
-Template used for all generated cases:
-- [templates/openfoam_base_case_yPlus1](../templates/openfoam_base_case_yPlus1)
-- configured in [configs/dataset_config.yaml](../configs/dataset_config.yaml) via `template_case_relpath`
+Runner používá `run_cases.max_workers` pro počet současných cases a `case_runner.n_procs` pro `mpiexec -np` uvnitř jednoho case. Adresáře bez `0`, `constant` a `system` ignoruje; filtr `--start-case-id` funguje jen pro názvy `case_<id>_...`.
 
-### Solver and turbulence model
+## Fyzikální a numerické nastavení šablony
 
-- Solver: `simpleFoam` (steady, incompressible RANS)
-- Turbulence framework: `RAS`
-- RAS model: `kOmegaSST`
-- Molecular kinematic viscosity: `nu = 1.5e-05 m2/s`
+Šablona [openfoam_base_case_yPlus1](../templates/openfoam_base_case_yPlus1) používá:
 
-Reference files:
-- [templates/openfoam_base_case_yPlus1/constant/turbulenceProperties](../templates/openfoam_base_case_yPlus1/constant/turbulenceProperties)
-- [templates/openfoam_base_case_yPlus1/constant/transportProperties](../templates/openfoam_base_case_yPlus1/constant/transportProperties)
+- steady incompressible RANS solver `simpleFoam`;
+- model `kOmegaSST`;
+- kinematickou viskozitu `1.5e-5 m²/s`;
+- low-Re wall treatment se sítí cílenou přibližně na `y+ ≈ 1`;
+- `empty` front/back boundary pro 2D výpočet.
 
-### Boundary-condition philosophy (low-Re near wall)
+Rychlostní inlet je pro každý case přepsán builderem. `forceCoeffs` dostává odpovídající `magUInf`, takže jeho historie slouží jako target scalar ML větve.
 
-The base case is set up as an external aerodynamics domain with velocity inlet and pressure outlet, slip far boundaries, and 2D extrusion (`empty` on front/back).
+`controlDict` provádí nejvýše 1000 SIMPLE iterací (`endTime=1000`) a zapisuje koncový stav (`writeInterval=1000`, `purgeWrite=1`, binary + compression). Residual control může solver ukončit dříve.
 
-Velocity and pressure:
-- `U`: inlet `fixedValue`, outlet `zeroGradient`, top/bottom/farfield `slip`, airfoil `noSlip`
-- `p`: outlet `fixedValue 0`, inlet/top/bottom/farfield/airfoil `zeroGradient`
+Hlavní schémata jsou `steadyState`, `Gauss linear`, bounded `linearUpwind` pro `U`, limited linear pro turbulence scalars a corrected laplacian/snGrad. Přesné aktuální hodnoty je nutné číst přímo z `system/fvSchemes` a `system/fvSolution` šablony.
 
-Turbulence quantities (current template behavior):
-- `k`: inlet `fixedValue 0.002`, airfoil `fixedValue 1e-10`
-- `omega`: inlet `fixedValue 300`, airfoil `omegaWallFunction` (with very low initial value)
-- `nut`: airfoil `nutLowReWallFunction`, other patches `calculated`
+## Detekce divergence
 
-This is a low-Re oriented wall treatment strategy (resolved near-wall mesh with y+ target around 1), combined with SST transport equations.
+Během `simpleFoam` runner sleduje log. Proces ukončí, pokud řádek lineárního solveru současně hlásí 1000 iterací a:
 
-Reference files:
-- [templates/openfoam_base_case_yPlus1/0/U](../templates/openfoam_base_case_yPlus1/0/U)
-- [templates/openfoam_base_case_yPlus1/0/p](../templates/openfoam_base_case_yPlus1/0/p)
-- [templates/openfoam_base_case_yPlus1/0/k](../templates/openfoam_base_case_yPlus1/0/k)
-- [templates/openfoam_base_case_yPlus1/0/omega](../templates/openfoam_base_case_yPlus1/0/omega)
-- [templates/openfoam_base_case_yPlus1/0/nut](../templates/openfoam_base_case_yPlus1/0/nut)
+- final residual je NaN nebo Inf; nebo
+- absolutní final residual je alespoň `1e2`.
 
-### Iteration and write policy
+Takový case dostane stav `nOK(...)` a zbývající kroky se přeskočí.
 
-The run is fixed to 1000 SIMPLE iterations per case:
-- `startTime 0`
-- `endTime 1000`
-- `deltaT 1`
+## Logy, archiv a cleanup
 
-So the solver advances pseudo-time steps 0 -> 1000, i.e. exactly 1000 SIMPLE outer iterations for each case.
+Per-case logy:
 
-Current disk-saving write setup:
-- `writeControl timeStep`
-- `writeInterval 1000` (write at the end)
-- `purgeWrite 1`
-- `writeFormat binary`
-- `writeCompression on`
+```text
+logs/01_blockMesh.log
+logs/02_checkMesh.log
+logs/03_decomposePar.log
+logs/04_simpleFoam.log
+logs/05_reconstructPar.log
+logs/06_foamToVTK.log
+```
 
-Reference file:
-- [templates/openfoam_base_case_yPlus1/system/controlDict](../templates/openfoam_base_case_yPlus1/system/controlDict)
+Po úspěchu se do `flow_fields_output/<case_id>` kopírují `logs`, `postProcessing`, `system`, `VTK`, nejnovější numerický time adresář a případný `params.json`.
 
-### Numerical schemes used (fvSchemes)
+Archivace záměrně nepřepisuje existující case adresář. Pokud cíl existuje, status je `target_exists(...)` a pracovní case zůstane. Po úspěšné archivaci se pracovní simulation case odstraní. Při selhání během solver chain se odstraní `processor*`; při selhání `foamToVTK` nebo archivace se case ponechá pro diagnostiku.
 
-From [templates/openfoam_base_case_yPlus1/system/fvSchemes](../templates/openfoam_base_case_yPlus1/system/fvSchemes):
-
-- Time derivative: `ddtSchemes.default = steadyState`
-- Gradient: `gradSchemes.default = Gauss linear`
-- Divergence:
-	- `div(phi,U) = bounded Gauss linearUpwind grad(U)`
-	- `div(phi,k) = bounded Gauss limitedLinear 1`
-	- `div(phi,epsilon) = bounded Gauss limitedLinear 1`
-	- `div(phi,omega) = bounded Gauss limitedLinear 1`
-	- `div(phi,v2) = bounded Gauss limitedLinear 1`
-	- `div((nuEff*dev2(T(grad(U))))) = Gauss linear`
-	- `div(nonlinearStress) = Gauss linear`
-- Laplacian: `laplacianSchemes.default = Gauss linear corrected`
-- Interpolation: `interpolationSchemes.default = linear`
-- Surface-normal gradient: `snGradSchemes.default = corrected`
-- Wall distance: `wallDist.method = meshWave`
-
-### SIMPLE and linear-solver controls (fvSolution)
-
-From [templates/openfoam_base_case_yPlus1/system/fvSolution](../templates/openfoam_base_case_yPlus1/system/fvSolution):
-
-- Pressure solver: `GAMG`, `tolerance 1e-07`, `relTol 0.02`
-- `U, k, epsilon, omega, f, v2` solver: `smoothSolver` + `symGaussSeidel`, `tolerance 1e-06`, `relTol 0.05`
-- SIMPLE:
-	- `nNonOrthogonalCorrectors 2`
-	- `consistent yes`
-	- residual control: `p 1e-5`, `U 1e-5`, `(k|omega) 1e-5`
-- Relaxation factors:
-	- fields: `p 0.3`
-	- equations: `U 0.5`, `k 0.3`, `omega 0.2`
-
-## Where configuration is read
-
-- runner logic: [src/case_runner.py](../src/case_runner.py)
-- launcher script: [scripts/run_cases.py](../scripts/run_cases.py)
-
-The following are config-driven:
-- number of MPI processes (`case_runner.n_procs`)
-- required case subdirectories
-- exact command list and per-step logs
-- parallel worker count for multi-case execution (`run_cases.max_workers`)
-
-## Case locations
-
-- run root: `openfoam_run_root_windows` + `blockmesh_cases_subdir`
-- simulation mirror: `openfoam_case_sim_windows` + `blockmesh_cases_subdir`
-
-Both roots come from [configs/paths.yaml](../configs/paths.yaml) + [configs/dataset_config.yaml](../configs/dataset_config.yaml).
-
-## Logs and run summary
-
-For each case:
-- `logs/01_blockMesh.log`
-- `logs/02_checkMesh.log`
-- `logs/03_decomposePar.log`
-- `logs/04_simpleFoam.log`
-- `logs/05_reconstructPar.log`
-
-Global summary:
-- `run_status.csv` in the cases root
-
-Per-case force coefficients (for scalar branch):
-- `postProcessing/forceCoeffs1/0/forceCoeffs.dat`
-
-## Notes
-
-- `simpleFoam` stays parallel (MPI), as required by current workflow.
-- If one step fails for a case, remaining steps for that case are skipped and status is marked as failed.
-- Scalar Cl/Cd ML pipeline reads only converged finite tail data from `forceCoeffs.dat`; incomplete or corrupted cases are skipped during dataset build.
+`run_status.csv` obsahuje stavy blockMesh, checkMesh, simpleFoam, foamToVTK, archivace, cleanup, celkový status a runtime.
