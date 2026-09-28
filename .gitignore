@@ -43,6 +43,9 @@ data/
 
 #TESTS
 tests/
+!tests/
+tests/*
+!tests/test_ml_experiment_infrastructure.py
 templates/openfoam_base_case_yPlus1_potentialFoam/0/k
 templates/openfoam_base_case_yPlus1_potentialFoam/0/nut
 templates/openfoam_base_case_yPlus1_potentialFoam/0/omega
