@@ -13,6 +13,15 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+
+def force_reference_area(chord: float, z_half: float) -> float:
+    """Return planform reference area for the actually extruded 2D mesh."""
+    if chord <= 0.0:
+        raise ValueError("chord must be > 0")
+    if z_half <= 0.0:
+        raise ValueError("z_half must be > 0")
+    return chord * (2.0 * z_half)
+
 def update_u_file(u_file: Path, inlet_velocity: float) -> None:
     """
     Upraví soubor 0/U:
@@ -51,10 +60,17 @@ def update_u_file(u_file: Path, inlet_velocity: float) -> None:
     u_file.write_text(text, encoding="utf-8")
 
 
-def update_force_coeffs_file(force_file: Path, inlet_velocity: float) -> None:
+def update_force_coeffs_file(
+    force_file: Path,
+    inlet_velocity: float,
+    chord: float,
+    z_half: float,
+) -> None:
     """
     Upraví system/forceCoeffs:
     - magUInf
+    - lRef from chord
+    - Aref from chord * actual extrusion span
 
     AoA řešíme natočením geometrie,
     proto dragDir/liftDir necháváme fixní.
@@ -64,13 +80,29 @@ def update_force_coeffs_file(force_file: Path, inlet_velocity: float) -> None:
 
     text = force_file.read_text(encoding="utf-8")
 
-    text, count = re.subn(
+    text, count_u = re.subn(
         r"magUInf\s+[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?\s*;",
         f"magUInf         {inlet_velocity:.6f};",
         text,
     )
 
-    if count == 0:
+    if count_u != 1:
         raise RuntimeError(f"Could not find magUInf entry in {force_file}")
+
+    area = force_reference_area(chord, z_half)
+    text, count_lref = re.subn(
+        r"lRef\s+[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?\s*;",
+        f"lRef            {chord:.12g};",
+        text,
+    )
+    text, count_aref = re.subn(
+        r"Aref\s+[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?\s*;",
+        f"Aref            {area:.12g};",
+        text,
+    )
+    if count_lref != 1:
+        raise RuntimeError(f"Could not find exactly one lRef entry in {force_file}")
+    if count_aref != 1:
+        raise RuntimeError(f"Could not find exactly one Aref entry in {force_file}")
 
     force_file.write_text(text, encoding="utf-8")

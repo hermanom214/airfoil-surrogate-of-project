@@ -18,7 +18,8 @@ forceCoeffs1
     magUInf         15.000000;
 
     lRef            1.0;
-    Aref            1.0;
+    // Case builder replaces this with chord * (2 * z_half).
+    Aref            0.1;
 
     CofR            (0 0 0);
 }

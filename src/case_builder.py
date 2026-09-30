@@ -35,6 +35,7 @@ def write_case_params_json(
     row: BuildCaseRow,
     case_id: str,
     template_case: Path,
+    z_half: float,
 ) -> None:
     """
     Zapíše metadata blockMesh case do params.json.
@@ -44,6 +45,10 @@ def write_case_params_json(
     payload["case_id"] = case_id
     payload["template_case"] = str(template_case)
     payload["mesh_type"] = "blockmesh"
+    payload["span"] = 2.0 * z_half
+    payload["Aref"] = row.chord * payload["span"]
+    payload["lRef"] = row.chord
+    payload["force_coefficient_convention"] = "planform_area_chord_times_actual_span"
 
     out_path = case_dir / "params.json"
     out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -120,8 +125,13 @@ def build_single_blockmesh_case(
     )
 
     update_u_file(case_dir / "0" / "U", row.inlet_velocity)
-    update_force_coeffs_file(case_dir / "system" / "forceCoeffs", row.inlet_velocity)
+    update_force_coeffs_file(
+        case_dir / "system" / "forceCoeffs",
+        row.inlet_velocity,
+        chord=row.chord,
+        z_half=blockmesh_cfg.z_half,
+    )
 
-    write_case_params_json(case_dir, row, case_id, template_case)
+    write_case_params_json(case_dir, row, case_id, template_case, blockmesh_cfg.z_half)
 
     return case_dir

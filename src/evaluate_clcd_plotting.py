@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Mapping
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+
+
+SUMMARY_FIGURE_SIZE = (13.0, 6.0)
+SUMMARY_FIGURE_DPI = 250
 
 
 def _scatter_true_vs_pred(
@@ -98,7 +103,99 @@ def _bar_abs_errors(
     plt.close(fig)
 
 
-def evaluate_generate_clcd_plots(metrics_df: pd.DataFrame, figures_dir: Path) -> None:
+def _summary_axis_limits(
+    true_values: np.ndarray,
+    pred_values: np.ndarray,
+) -> tuple[float, float]:
+    """Return honest, equal x/y limits with a small margin for one coefficient."""
+    lo = float(min(np.min(true_values), np.min(pred_values)))
+    hi = float(max(np.max(true_values), np.max(pred_values)))
+    span = hi - lo
+    margin = 0.05 * span if span > 0.0 else max(abs(lo) * 0.05, 1e-8)
+    return lo - margin, hi + margin
+
+
+def _format_summary_metric(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.6g}"
+
+
+def _clcd_summary_scatter(
+    metrics_df: pd.DataFrame,
+    global_metrics: Mapping[str, Mapping[str, float | None]],
+    output_path: Path,
+) -> None:
+    fig, axes = plt.subplots(
+        1,
+        2,
+        figsize=SUMMARY_FIGURE_SIZE,
+        constrained_layout=True,
+    )
+
+    for ax, coefficient, panel_title in zip(
+        axes,
+        ("Cl", "Cd"),
+        ("Lift coefficient, Cl", "Drag coefficient, Cd"),
+    ):
+        true_values = metrics_df[f"{coefficient}_true"].to_numpy(dtype=np.float64)
+        pred_values = metrics_df[f"{coefficient}_pred"].to_numpy(dtype=np.float64)
+        valid = np.isfinite(true_values) & np.isfinite(pred_values)
+        true_values = true_values[valid]
+        pred_values = pred_values[valid]
+
+        if true_values.size == 0:
+            continue
+
+        lo, hi = _summary_axis_limits(true_values, pred_values)
+        ax.scatter(true_values, pred_values, s=34, alpha=0.78, edgecolors="none")
+        ax.plot(
+            [lo, hi],
+            [lo, hi],
+            linestyle="--",
+            linewidth=1.4,
+            color="0.25",
+            label="Perfect prediction",
+        )
+        ax.set_xlim(lo, hi)
+        ax.set_ylim(lo, hi)
+        ax.set_aspect("equal", adjustable="box")
+        ax.ticklabel_format(style="plain", axis="both", useOffset=False)
+        ax.set_xlabel(f"CFD {coefficient}", fontsize=12)
+        ax.set_ylabel(f"ML-predicted {coefficient}", fontsize=12)
+        ax.set_title(panel_title, fontsize=14)
+        ax.tick_params(labelsize=10)
+        ax.grid(True, alpha=0.22)
+        ax.legend(loc="lower right", frameon=False, fontsize=9)
+
+        coefficient_metrics = global_metrics[coefficient]
+        metrics_text = (
+            f"R² = {_format_summary_metric(coefficient_metrics['R2'])}\n"
+            f"MAE = {_format_summary_metric(coefficient_metrics['MAE'])}"
+        )
+        ax.text(
+            0.04,
+            0.96,
+            metrics_text,
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=10.5,
+            bbox={
+                "boxstyle": "round,pad=0.35",
+                "facecolor": "white",
+                "alpha": 0.82,
+                "edgecolor": "0.8",
+            },
+        )
+
+    fig.savefig(output_path, dpi=SUMMARY_FIGURE_DPI)
+    plt.close(fig)
+
+
+def evaluate_generate_clcd_plots(
+    metrics_df: pd.DataFrame,
+    figures_dir: Path,
+    global_metrics: Mapping[str, Mapping[str, float | None]],
+) -> None:
     if metrics_df.empty:
         return
 
@@ -154,4 +251,10 @@ def evaluate_generate_clcd_plots(metrics_df: pd.DataFrame, figures_dir: Path) ->
         ylabel="Absolute Cd error",
         title="Absolute Cd error by case (sorted)",
         output_path=figures_dir / "cd_errors.png",
+    )
+
+    _clcd_summary_scatter(
+        metrics_df=metrics_df,
+        global_metrics=global_metrics,
+        output_path=figures_dir / "clcd_summary_scatter.png",
     )

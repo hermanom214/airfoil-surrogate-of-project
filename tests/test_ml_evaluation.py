@@ -1,14 +1,75 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import torch
+import matplotlib
 
+matplotlib.use("Agg")
+
+from matplotlib.figure import Figure
+
+from src.evaluate_clcd_plotting import (
+    SUMMARY_FIGURE_DPI,
+    SUMMARY_FIGURE_SIZE,
+    evaluate_generate_clcd_plots,
+)
 from src.evaluate_metrics import (
     evaluate_finalize_global_aggregator,
     evaluate_init_global_aggregator,
     evaluate_update_global_aggregator,
 )
 from src.ml_dataset import AirfoilFlowDataset
+
+
+def test_clcd_summary_uses_evaluated_values_metrics_and_separate_scales(
+    tmp_path, monkeypatch
+) -> None:
+    metrics_df = pd.DataFrame(
+        {
+            "case_id": ["a", "b", "c"],
+            "Cl_true": [-0.5, 0.25, 1.0],
+            "Cl_pred": [-0.48, 0.27, 0.96],
+            "Cl_abs_error": [0.02, 0.02, 0.04],
+            "Cd_true": [0.010, 0.020, 0.030],
+            "Cd_pred": [0.012, 0.018, 0.035],
+            "Cd_abs_error": [0.002, 0.002, 0.005],
+        }
+    )
+    global_metrics = {
+        "Cl": {"R2": 0.987654321, "MAE": 0.026666666},
+        "Cd": {"R2": 0.75, "MAE": 0.003},
+    }
+    captured: dict[str, object] = {}
+    original_savefig = Figure.savefig
+
+    def capture_summary(self, fname, *args, **kwargs):
+        if str(fname).endswith("clcd_summary_scatter.png"):
+            captured["figure"] = self
+            captured["dpi"] = kwargs.get("dpi")
+        return original_savefig(self, fname, *args, **kwargs)
+
+    monkeypatch.setattr(Figure, "savefig", capture_summary)
+    evaluate_generate_clcd_plots(metrics_df, tmp_path, global_metrics)
+
+    assert (tmp_path / "clcd_summary_scatter.png").is_file()
+    assert captured["dpi"] == SUMMARY_FIGURE_DPI
+    figure = captured["figure"]
+    assert tuple(figure.get_size_inches()) == SUMMARY_FIGURE_SIZE
+    assert figure._suptitle is None
+
+    cl_axis, cd_axis = figure.axes
+    np.testing.assert_allclose(
+        cl_axis.collections[0].get_offsets(), metrics_df[["Cl_true", "Cl_pred"]]
+    )
+    np.testing.assert_allclose(
+        cd_axis.collections[0].get_offsets(), metrics_df[["Cd_true", "Cd_pred"]]
+    )
+    assert cl_axis.get_xlim() == cl_axis.get_ylim()
+    assert cd_axis.get_xlim() == cd_axis.get_ylim()
+    assert cl_axis.get_xlim() != cd_axis.get_xlim()
+    assert "R² = 0.987654" in cl_axis.texts[0].get_text()
+    assert "MAE = 0.003" in cd_axis.texts[0].get_text()
 
 
 def test_global_aggregator_uses_intersection_of_valid_cells() -> None:

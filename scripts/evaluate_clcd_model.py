@@ -258,7 +258,7 @@ def run_clcd_validation(device_requested: str | None = None) -> None:
         encoding="utf-8",
     )
 
-    evaluate_generate_clcd_plots(metrics_df, figures_dir)
+    evaluate_generate_clcd_plots(metrics_df, figures_dir, global_metrics)
 
     print("[CLCD VALIDATION SUMMARY]")
     print(f"Model: {summary['model_name']}")
