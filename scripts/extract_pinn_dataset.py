@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import shutil
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -27,14 +26,13 @@ from src.pinn_dataset import (  # noqa: E402
     save_case_npz,
     summary_for_arrays,
     validate_arrays,
-    verify_split_mapping,
 )
+from src.ml_quality_filter import load_inspection_membership  # noqa: E402
 
 
 SOURCE_ROOT = PROJECT_ROOT / "data" / "flow_fields"
 CASE_CONFIG_ROOT = PROJECT_ROOT / "run" / "airfoil_surrogate_cases" / "blockmesh_cases"
 OUTPUT_ROOT = PROJECT_ROOT / "data" / "pinn_dataset"
-SPLIT_PATH = PROJECT_ROOT / "data" / "models" / "simple_unet" / "fixed_test_split.json"
 SOURCE_TIME = "1000"
 STENCIL_RADIUS = 2
 
@@ -45,6 +43,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--validate-only", action="store_true", help="Validate source cases without writing NPZ files.")
     parser.add_argument("--output-root", type=Path, default=OUTPUT_ROOT)
     parser.add_argument("--resume", action="store_true", help="Resume an explicitly selected existing output directory.")
+    parser.add_argument(
+        "--clean-rebuild", action="store_true",
+        help="Delete and rebuild only the default generated PINN dataset directory.",
+    )
     parser.add_argument("--workers", type=int, default=1, help="Independent extraction processes (default: 1).")
     return parser.parse_args()
 
@@ -92,9 +94,63 @@ def _sample_turbulence(case_dir: Path, xy: np.ndarray) -> tuple[dict[str, np.nda
     return output, valid
 
 
-def _source_case_ids() -> list[str]:
-    split = json.loads(SPLIT_PATH.read_text(encoding="utf-8"))
-    return [str(v) for v in split["dataset_case_ids"]]
+def discover_archived_case_ids(source_root: Path = SOURCE_ROOT) -> list[str]:
+    return sorted(
+        path.name for path in source_root.glob("case_*")
+        if path.is_dir() and (path / "VTK").is_dir() and (path / "system").is_dir()
+    )
+
+
+def inspection_candidates(source_root: Path = SOURCE_ROOT):
+    archived_ids = discover_archived_case_ids(source_root)
+    membership = load_inspection_membership(source_root)
+    archived = set(archived_ids)
+    inspected = set(membership.case_statuses)
+    if archived != inspected:
+        raise RuntimeError(
+            "Inspection membership does not exactly cover archived CFD cases; "
+            f"missing inspection records={sorted(archived - inspected)}, "
+            f"unknown inspection records={sorted(inspected - archived)}"
+        )
+    return archived_ids, membership
+
+
+def clean_generated_output(output_root: Path, expected_root: Path = OUTPUT_ROOT) -> None:
+    resolved = output_root.resolve()
+    expected = expected_root.resolve()
+    if resolved != expected:
+        raise ValueError(
+            f"--clean-rebuild may only target the generated PINN dataset {expected}; got {resolved}"
+        )
+    if resolved == SOURCE_ROOT.resolve() or SOURCE_ROOT.resolve() in resolved.parents:
+        raise ValueError("Refusing to clean CFD/U-Net source data")
+    if resolved.exists():
+        import shutil
+        shutil.rmtree(resolved)
+
+
+def verify_final_artifacts(
+    output_root: Path, candidate_ids: list[str], results: list[CaseResult]
+) -> dict[str, object]:
+    successful = {result.case_id for result in results if result.status == "ok"}
+    rejected = {result.case_id for result in results if result.status != "ok"}
+    candidates = set(candidate_ids)
+    artifact_ids = {
+        path.parent.name for path in (output_root / "cases").glob("*/*.npz")
+    }
+    if successful | rejected != candidates or successful & rejected:
+        raise RuntimeError("PINN manifest does not partition all inspection-OK candidates")
+    if artifact_ids != successful:
+        raise RuntimeError(
+            "PINN artifacts do not match successful manifest membership; "
+            f"stale_or_unknown={sorted(artifact_ids - successful)}, "
+            f"missing={sorted(successful - artifact_ids)}"
+        )
+    return {
+        "all_candidates_accounted_for": True,
+        "artifact_membership_matches_manifest": True,
+        "stale_artifact_count": 0,
+    }
 
 
 def inspect_case_sources(case_id: str) -> tuple[Path, Path, dict[str, object], float]:
@@ -220,11 +276,19 @@ def main() -> None:
         raise ValueError("PINN dataset output must not target the existing U-Net flow_fields directory")
     if args.workers <= 0:
         raise ValueError("--workers must be positive")
+    if args.clean_rebuild:
+        if args.resume or args.validate_only or args.case_id:
+            raise ValueError("--clean-rebuild cannot be combined with --resume, --validate-only, or --case-id")
+        clean_generated_output(output_root)
     if output_root.exists() and not args.validate_only and not args.resume:
         raise FileExistsError(f"Refusing to reuse existing output directory without --resume: {output_root}")
     if not args.validate_only:
         output_root.mkdir(parents=True, exist_ok=args.resume)
-    case_ids = args.case_id or _source_case_ids()
+    archived_ids, membership = inspection_candidates(SOURCE_ROOT)
+    case_ids = args.case_id or membership.ok_case_ids
+    unknown_or_excluded = sorted(set(case_ids) - set(membership.ok_case_ids))
+    if unknown_or_excluded:
+        raise ValueError(f"Requested cases are not inspection-OK: {unknown_or_excluded}")
     results: list[CaseResult] = []
     details: list[dict] = []
     if args.workers == 1:
@@ -259,22 +323,33 @@ def main() -> None:
         writer.writeheader()
         writer.writerows(case_result_dict(result) for result in results)
     successful_ids = [result.case_id for result in results if result.status == "ok"]
-    split_mapping = verify_split_mapping(successful_ids, SPLIT_PATH)
-    shutil.copy2(SPLIT_PATH, output_root / "source_fixed_test_split.json")
+    invariants = verify_final_artifacts(output_root, case_ids, results)
+    inspection_exclusions = [
+        {"case_id": case_id, "reason": membership.exclusion_reasons[case_id]}
+        for case_id in membership.nok_case_ids
+    ]
     payload = {
         "source_time": SOURCE_TIME,
         "grid_shape": list(GRID_SHAPE),
         "stencil_radius_pixels": STENCIL_RADIUS,
+        "archived_source_cases": len(archived_ids),
+        "inspection_ok_cases": len(membership.ok_case_ids),
+        "inspection_nok_cases": len(membership.nok_case_ids),
+        "inspection_exclusions": inspection_exclusions,
+        "inspection_artifact": str(membership.csv_path),
+        "inspection_artifact_sha256": membership.artifact_sha256,
+        "inspection_membership_fingerprint": membership.membership_fingerprint,
         "requested_cases": len(case_ids),
         "successful_cases": len(successful_ids),
+        "pinn_rejected_cases": len(case_ids) - len(successful_ids),
         "invalid_or_failed_cases": [case_result_dict(result) for result in results if result.status != "ok"],
-        "split_mapping": split_mapping,
+        "post_rebuild_invariants": invariants,
         "aggregate_statistics": _aggregate_stats(details),
         "units": FIELD_UNITS,
     }
     (output_root / "validation_summary.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(json.dumps(payload, indent=2))
-    if len(successful_ids) != len(case_ids) or not split_mapping["all_mapped"]:
+    if any(result.status == "error" for result in results):
         raise SystemExit(1)
 
 

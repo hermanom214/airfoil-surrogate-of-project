@@ -45,7 +45,15 @@ MANUALLY_EXCLUDED_CASES = {
     "case_0603_naca2416_aoam4p0_u20p0": "visually_invalid_flow_field",
     "case_0604_naca2416_aoam4p0_u22p5": "visually_invalid_flow_field",
     "case_0610_naca2416_aoam2p0_u25p0": "visually_invalid_flow_field",
-    "case_0620_naca2416_aoa2p0_u25p0": "visually_invalid_flow_field"
+    "case_0620_naca2416_aoa2p0_u25p0": "visually_invalid_flow_field",
+    # Additional exclusions from continuity/outlier review
+    "case_0068_naca0012_aoa2p0_u20p0": "visually_invalid_velocity_field",
+    "case_0073_naca0012_aoa4p0_u20p0": "visually_invalid_velocity_field",
+    "case_0079_naca0014_aoam4p0_u22p5": "visually_invalid_flow_behavior",
+    "case_0227_naca1216_aoam4p0_u17p5": "visually_invalid_velocity_field",
+    "case_0248_naca1216_aoa4p0_u20p0": "visually_invalid_velocity_field",
+    "case_0458_naca2214_aoam2p0_u20p0": "visually_invalid_oscillatory_velocity_field",
+    "case_0489_naca2216_aoa0p0_u22p5": "visually_invalid_velocity_field"
 }
 
 RESIDUAL_RE = re.compile(

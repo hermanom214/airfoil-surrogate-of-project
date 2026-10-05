@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import csv
 from pathlib import Path
 
 import numpy as np
@@ -11,8 +11,10 @@ from src.pinn_dataset import (
     build_physics_valid_mask,
     parse_openfoam_uniform_nu,
     validate_arrays,
-    verify_split_mapping,
 )
+from scripts.extract_pinn_dataset import clean_generated_output, inspection_candidates, verify_final_artifacts
+from src.ml_quality_filter import load_inspection_membership
+from src.pinn_dataset import CaseResult
 
 
 def test_sdf_sign_and_rotation() -> None:
@@ -74,18 +76,73 @@ def test_invalid_turbulence_values_are_reported_not_clipped() -> None:
     assert arrays["k"][0, 0] == -1.0
 
 
-def test_split_mapping(tmp_path: Path) -> None:
-    split = {
-        "dataset_case_ids": ["a", "b", "c"],
-        "development_case_ids": ["a", "b"],
-        "test_case_ids": ["c"],
-    }
-    path = tmp_path / "split.json"
-    path.write_text(json.dumps(split), encoding="utf-8")
-    mapping = verify_split_mapping(["a", "b", "c"], path)
-    assert mapping["all_mapped"] is True
-    assert mapping["development_count"] == 2
-    assert mapping["test_count"] == 1
+def _write_inspection(path: Path, rows: list[tuple[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["case_name", "overall_status", "overall_reason"])
+        writer.writeheader()
+        for case_id, status in rows:
+            writer.writerow({"case_name": case_id, "overall_status": status, "overall_reason": status})
+
+
+def test_pinn_candidates_come_from_inspection_not_split(tmp_path: Path) -> None:
+    source = tmp_path / "flow_fields"
+    for case_id in ("case_a", "case_b"):
+        (source / case_id / "VTK").mkdir(parents=True)
+        (source / case_id / "system").mkdir()
+    _write_inspection(tmp_path / "pictures_inspect_flow" / "inspect_plausibility.csv", [
+        ("case_a", "OK"), ("case_b", "nOK")
+    ])
+    archived, membership = inspection_candidates(source)
+    assert archived == ["case_a", "case_b"]
+    assert membership.ok_case_ids == ["case_a"]
+
+
+def test_missing_inspection_csv_fails_closed(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="refusing to construct an unfiltered"):
+        load_inspection_membership(tmp_path / "flow_fields")
+
+
+def test_malformed_inspection_csv_fails(tmp_path: Path) -> None:
+    path = tmp_path / "pictures_inspect_flow" / "inspect_plausibility.csv"
+    path.parent.mkdir(parents=True)
+    path.write_text("case_name,overall_status\ncase_a,BAD\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="missing required columns"):
+        load_inspection_membership(tmp_path / "flow_fields")
+
+
+def test_duplicate_inspection_cases_fail(tmp_path: Path) -> None:
+    _write_inspection(
+        tmp_path / "pictures_inspect_flow" / "inspect_plausibility.csv",
+        [("case_a", "OK"), ("case_a", "nOK")],
+    )
+    with pytest.raises(ValueError, match="Duplicate inspection record"):
+        load_inspection_membership(tmp_path / "flow_fields")
+
+
+def test_inspection_membership_fingerprint_is_order_independent(tmp_path: Path) -> None:
+    path = tmp_path / "pictures_inspect_flow" / "inspect_plausibility.csv"
+    _write_inspection(path, [("case_b", "nOK"), ("case_a", "OK")])
+    first = load_inspection_membership(tmp_path / "flow_fields")
+    path.unlink()
+    _write_inspection(path, [("case_a", "OK"), ("case_b", "nOK")])
+    second = load_inspection_membership(tmp_path / "flow_fields")
+    assert first.ok_case_ids == ["case_a"]
+    assert first.nok_case_ids == ["case_b"]
+    assert first.membership_fingerprint == second.membership_fingerprint
+
+
+def test_clean_rebuild_rejects_unexpected_target(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="may only target"):
+        clean_generated_output(tmp_path / "wrong", tmp_path / "expected")
+
+
+def test_final_artifacts_reject_stale_case(tmp_path: Path) -> None:
+    stale = tmp_path / "cases" / "case_stale"
+    stale.mkdir(parents=True)
+    np.savez(stale / "case_stale.npz", x=np.ones(1))
+    with pytest.raises(RuntimeError, match="stale_or_unknown"):
+        verify_final_artifacts(tmp_path, ["case_a"], [CaseResult("case_a", "invalid")])
 
 
 def test_output_guard_targets_separate_directory() -> None:

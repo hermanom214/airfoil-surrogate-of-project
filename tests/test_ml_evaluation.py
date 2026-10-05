@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+
 import numpy as np
 import pandas as pd
 import torch
@@ -132,6 +134,16 @@ def test_dataset_returns_float32_tensors(tmp_path) -> None:
     case_dir.mkdir()
     sample_path = case_dir / "case_0001_naca0012_aoa0p0_u15p0_flow.npz"
     np.savez_compressed(sample_path, xy=xy, p=p, U=u, fluid_mask=fluid_mask)
+    inspection_path = tmp_path.parent / "pictures_inspect_flow" / "inspect_plausibility.csv"
+    inspection_path.parent.mkdir(exist_ok=True)
+    with inspection_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=["case_name", "overall_status", "overall_reason"]
+        )
+        writer.writeheader()
+        writer.writerow({
+            "case_name": case_dir.name, "overall_status": "OK", "overall_reason": ""
+        })
 
     dataset = AirfoilFlowDataset(tmp_path)
     inp, target, mask = dataset[0]
