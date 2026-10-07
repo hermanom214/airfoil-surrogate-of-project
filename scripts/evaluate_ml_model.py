@@ -9,12 +9,22 @@ from typing import Any, cast
 import numpy as np
 import pandas as pd
 import torch
+import matplotlib
 from torch.utils.data import Subset
+
+matplotlib.use("Agg")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
 from src.config import load_ml_models_config, load_paths
+from src.aero_coefficients_evaluation import build_aero_summary, generate_aero_plots
+from src.aero_coefficients_from_fields import (
+    FieldCoefficientSettings,
+    ForceCoefficientConfig,
+    derive_aero_coefficients_from_fields,
+)
+from src.ml_clcd_dataset import read_cl_cd_tail_average
 from src.evaluate_io import (
     evaluate_extract_case_meta,
     evaluate_get_model_kwargs,
@@ -33,6 +43,7 @@ from src.evaluate_plotting import (
     evaluate_generate_dataset_level_plot,
     evaluate_plot_fields_comparison,
     evaluate_plot_velocity_comparison,
+    evaluate_symmetric_error_limit,
 )
 from src.ml_data_split import build_train_val_split
 from src.ml_dataset import AirfoilFlowDataset, parse_case_params
@@ -62,10 +73,12 @@ def run_validation(device_requested: str | None = None) -> None:
     metrics_dir = validation_root / "metrics"
     velocity_fig_dir = validation_root / "velocity_figures"
     field_fig_dir = validation_root / "field_figures"
+    aero_fig_dir = validation_root / "aero_coefficient_figures"
 
     metrics_dir.mkdir(parents=True, exist_ok=True)
     velocity_fig_dir.mkdir(parents=True, exist_ok=True)
     field_fig_dir.mkdir(parents=True, exist_ok=True)
+    aero_fig_dir.mkdir(parents=True, exist_ok=True)
 
     if not model_path.exists():
         raise FileNotFoundError(f"Model weights not found: {model_path}")
@@ -133,6 +146,7 @@ def run_validation(device_requested: str | None = None) -> None:
     dataset_plot_path = metrics_dir / "validation_case_errors.png"
 
     rows: list[dict[str, Any]] = []
+    plot_cases: list[dict[str, Any]] = []
     failed_cases: list[dict[str, str]] = []
     warned_mask_metadata_missing = False
 
@@ -284,34 +298,158 @@ def run_validation(device_requested: str | None = None) -> None:
                 "sampling locations are orientational"
             )
 
-            evaluate_plot_velocity_comparison(
-                output_path=velocity_fig_dir / f"{meta['case_id']}_velocity_comparison.png",
-                xy=xy,
-                fluid_mask=fluid_mask,
-                speed_true=speed_true,
-                speed_pred=speed_pred,
-                velocity_vector_error=velocity_vector_error,
-                case_label=case_label,
-                subtitle=subtitle,
-                annotations=annotations,
-            )
-
-            evaluate_plot_fields_comparison(
-                output_path=field_fig_dir / f"{meta['case_id']}_fields_comparison.png",
-                xy=xy,
-                fluid_mask=fluid_mask,
-                p_true=p_true,
-                p_pred=p_pred,
-                ux_true=ux_true,
-                ux_pred=ux_pred,
-                uy_true=uy_true,
-                uy_pred=uy_pred,
-                case_label=case_label,
+            plot_cases.append(
+                {
+                    "case_id": str(meta["case_id"]),
+                    "xy": xy,
+                    "fluid_mask": fluid_mask,
+                    "speed_true": speed_true,
+                    "speed_pred": speed_pred,
+                    "velocity_vector_error": velocity_vector_error,
+                    "p_true": p_true,
+                    "p_pred": p_pred,
+                    "ux_true": ux_true,
+                    "ux_pred": ux_pred,
+                    "uy_true": uy_true,
+                    "uy_pred": uy_pred,
+                    "case_label": case_label,
+                    "subtitle": subtitle,
+                    "annotations": annotations,
+                    "meta": meta,
+                }
             )
 
         except Exception as exc:
             failed_cases.append({"local_validation_index": str(local_idx), "error": str(exc)})
             print(f"[ERROR] Validation failed for local index {local_idx}: {exc}")
+
+    if plot_cases:
+        error_limits = {
+            name: evaluate_symmetric_error_limit(
+                np.concatenate(
+                    [(case[f"{name}_pred"] - case[f"{name}_true"])[case["fluid_mask"]] for case in plot_cases]
+                )
+            )
+            for name in ("p", "ux", "uy")
+        }
+        vector_error_limit = evaluate_symmetric_error_limit(
+            np.concatenate([case["velocity_vector_error"][case["fluid_mask"]] for case in plot_cases])
+        )
+
+        for case in plot_cases:
+            case_id = case["case_id"]
+            evaluate_plot_velocity_comparison(
+                output_path=velocity_fig_dir / f"{case_id}_velocity_comparison.png",
+                xy=case["xy"],
+                fluid_mask=case["fluid_mask"],
+                speed_true=case["speed_true"],
+                speed_pred=case["speed_pred"],
+                velocity_vector_error=case["velocity_vector_error"],
+                case_label=case["case_label"],
+                subtitle=case["subtitle"],
+                annotations=case["annotations"],
+                vector_error_limit=vector_error_limit,
+            )
+            evaluate_plot_fields_comparison(
+                output_path=field_fig_dir / f"{case_id}_fields_comparison.png",
+                xy=case["xy"],
+                fluid_mask=case["fluid_mask"],
+                p_true=case["p_true"],
+                p_pred=case["p_pred"],
+                ux_true=case["ux_true"],
+                ux_pred=case["ux_pred"],
+                uy_true=case["uy_true"],
+                uy_pred=case["uy_pred"],
+                case_label=case["case_label"],
+                error_limits=error_limits,
+            )
+
+    aero_rows: list[dict[str, Any]] = []
+    is_fixed_test_evaluation = bool(checkpoint and checkpoint.get("test_case_ids"))
+    aero_settings = FieldCoefficientSettings(nu=float(ml_cfg.physics_loss.nu))
+    if is_fixed_test_evaluation:
+        force_relpath = Path(ml_cfg.model.params.clcd_mlp.force_coeffs_relpath)
+        local_case_root = paths.project_root / "run" / "airfoil_surrogate_cases" / "blockmesh_cases"
+        solver_case_root = paths.openfoam_case_sim / "blockmesh_cases"
+        for case in plot_cases:
+            meta = case["meta"]
+            params = meta.get("params", {})
+            span = float(params.get("span", 0.1))
+            chord = float(meta["chord"])
+            force_config = ForceCoefficientConfig(
+                reference_area=float(params.get("Aref", chord * span)),
+                reference_length=float(params.get("lRef", chord)),
+                span=span,
+            )
+            common = dict(
+                xy=case["xy"], fluid_mask=case["fluid_mask"],
+                naca_code=str(meta["naca_code"]), chord=chord,
+                aoa_deg=float(meta["aoa_deg"]), inlet_velocity=float(meta["inlet_velocity"]),
+                force_config=force_config, settings=aero_settings,
+            )
+            true_result = derive_aero_coefficients_from_fields(
+                p=case["p_true"], U=np.stack((case["ux_true"], case["uy_true"]), axis=-1), **common
+            )
+            pred_result = derive_aero_coefficients_from_fields(
+                p=case["p_pred"], U=np.stack((case["ux_pred"], case["uy_pred"]), axis=-1), **common
+            )
+            cl_openfoam = cd_openfoam = float("nan")
+            reference_error = ""
+            candidates = [
+                paths.flow_fields_output / case["case_id"] / force_relpath,
+                local_case_root / case["case_id"] / force_relpath,
+                solver_case_root / case["case_id"] / force_relpath,
+            ]
+            reference_path = next((path for path in candidates if path.is_file()), None)
+            if reference_path is not None:
+                try:
+                    cl_openfoam, cd_openfoam = read_cl_cd_tail_average(reference_path)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    reference_error = str(exc)
+            else:
+                reference_error = "forceCoeffs.dat not found"
+
+            row = {
+                "case_id": case["case_id"], "naca": str(meta["naca_code"]),
+                "aoa_deg": float(meta["aoa_deg"]), "inlet_velocity": float(meta["inlet_velocity"]),
+                "cl_openfoam": cl_openfoam, "cd_openfoam": cd_openfoam,
+                "reference_path": str(reference_path) if reference_path else "", "reference_error": reference_error,
+                "pressure_valid": bool(true_result.pressure_valid and pred_result.pressure_valid),
+                "viscous_valid": bool(true_result.viscous_valid and pred_result.viscous_valid),
+                "true_pressure_valid": true_result.pressure_valid, "pred_pressure_valid": pred_result.pressure_valid,
+                "true_viscous_valid": true_result.viscous_valid, "pred_viscous_valid": pred_result.viscous_valid,
+                "true_diagnostics": json.dumps(sanitize_for_json(true_result.diagnostics), sort_keys=True),
+                "pred_diagnostics": json.dumps(sanitize_for_json(pred_result.diagnostics), sort_keys=True),
+            }
+            for prefix, result in (("true_grid", true_result), ("pred", pred_result)):
+                for coefficient in ("cl", "cd"):
+                    for contribution in ("pressure", "viscous", "total"):
+                        row[f"{coefficient}_{prefix}_{contribution}"] = getattr(result, f"{coefficient}_{contribution}")
+            for coefficient in ("cl", "cd"):
+                of_value = row[f"{coefficient}_openfoam"]
+                true_value = row[f"{coefficient}_true_grid_pressure"]
+                pred_value = row[f"{coefficient}_pred_pressure"]
+                row[f"{coefficient}_true_grid_vs_openfoam_abs_error"] = abs(true_value - of_value)
+                row[f"{coefficient}_pred_vs_openfoam_abs_error"] = abs(pred_value - of_value)
+                row[f"{coefficient}_pred_vs_true_grid_abs_error"] = abs(pred_value - true_value)
+            aero_rows.append(row)
+
+        aero_df = pd.DataFrame(aero_rows)
+        aero_df.to_csv(metrics_dir / "aero_coefficients_test.csv", index=False)
+        settings_payload = {
+            **sanitize_for_json(aero_settings.__dict__),
+            "force_coefficients": {
+                "lift_dir": [0.0, 1.0], "drag_dir": [1.0, 0.0],
+                "lRef": "case chord", "Aref": "case chord * span", "span": "case metadata",
+                "pressure": "kinematic", "rho_cancels": True,
+            },
+            "regression_method": "least-squares linear fit through no-slip U_t(0)=0",
+        }
+        aero_summary = build_aero_summary(aero_df, settings_payload)
+        (metrics_dir / "aero_coefficients_summary.json").write_text(
+            json.dumps(sanitize_for_json(aero_summary), indent=2, allow_nan=False), encoding="utf-8"
+        )
+        generate_aero_plots(aero_df, aero_fig_dir)
 
     metrics_df = pd.DataFrame(rows)
     if not metrics_df.empty:
@@ -335,7 +473,7 @@ def run_validation(device_requested: str | None = None) -> None:
             "validation_case_count": int(len(metrics_df)),
             "validation_split": float(ml_cfg.training.validation_split),
             "split_seed": int(ml_cfg.training.split_seed),
-            "device": device,
+            "device": str(device),
             "normalization_statistics": {
                 "aoa_mean": float(dataset.aoa_mean),
                 "aoa_std": float(dataset.aoa_std),
@@ -375,7 +513,7 @@ def run_validation(device_requested: str | None = None) -> None:
             "validation_case_count": 0,
             "validation_split": float(ml_cfg.training.validation_split),
             "split_seed": int(ml_cfg.training.split_seed),
-            "device": device,
+            "device": str(device),
             "normalization_statistics": {
                 "aoa_mean": float(dataset.aoa_mean),
                 "aoa_std": float(dataset.aoa_std),

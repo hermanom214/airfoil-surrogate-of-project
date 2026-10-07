@@ -5,7 +5,13 @@ from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib import cm
+
+
+ABSOLUTE_FIELD_CMAP = "turbo"
+DIFFERENCE_CMAP = "turbo"
+VECTOR_ERROR_CMAP = "turbo"
+DIFF_PERCENTILE = 99.0
+DIFF_DISPLAY_SCALE = 3
 
 
 def evaluate_robust_limits(arr: np.ndarray, low: float, high: float) -> tuple[float, float]:
@@ -99,9 +105,24 @@ def evaluate_build_velocity_annotations(
     return out
 
 
-def _evaluate_blue_to_red_colormap() -> Any:
-    # Blue for low values, red for high values.
-    cmap = cm.get_cmap("RdYlBu_r").copy()
+def evaluate_symmetric_error_limit(
+    errors: np.ndarray,
+    percentile: float = DIFF_PERCENTILE,
+    display_scale: float = DIFF_DISPLAY_SCALE,
+) -> float:
+    values = np.abs(np.asarray(errors, dtype=np.float64))
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return 1.0
+    robust_limit = float(np.percentile(values, percentile))
+    if robust_limit <= 0.0:
+        robust_limit = float(np.max(values))
+    return max(display_scale * robust_limit, np.finfo(np.float64).eps)
+
+
+def _evaluate_colormap(name: str) -> Any:
+    cmap = plt.get_cmap(name).copy()
+    # Preserve the existing light airfoil/masked-cell rendering.
     cmap.set_bad(color="#efefef")
     return cmap
 
@@ -116,6 +137,7 @@ def evaluate_plot_velocity_comparison(
     case_label: str,
     subtitle: str,
     annotations: list[dict[str, float | str]],
+    vector_error_limit: float | None = None,
 ) -> None:
     x = xy[:, :, 0]
     y = xy[:, :, 1]
@@ -126,20 +148,23 @@ def evaluate_plot_velocity_comparison(
 
     combined = np.concatenate([speed_true[fluid_mask], speed_pred[fluid_mask]])
     vmin, vmax = evaluate_robust_limits(combined, 1.0, 99.5)
-    emax = float(np.percentile(velocity_vector_error[fluid_mask], 99.5))
-    if emax <= 0:
-        emax = float(np.max(velocity_vector_error[fluid_mask])) + 1e-6
+    emax = (
+        vector_error_limit
+        if vector_error_limit is not None
+        else evaluate_symmetric_error_limit(velocity_vector_error[fluid_mask])
+    )
 
-    cmap = _evaluate_blue_to_red_colormap()
+    field_cmap = _evaluate_colormap(ABSOLUTE_FIELD_CMAP)
+    error_cmap = _evaluate_colormap(VECTOR_ERROR_CMAP)
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 5.2), constrained_layout=True)
     panels = [
-        (speed_true_m, "OpenFOAM |U| [m/s]", vmin, vmax),
-        (speed_pred_m, "Predicted |U| [m/s]", vmin, vmax),
-        (err_m, "Vector error |U_pred - U_OF| [m/s]", 0.0, emax),
+        (speed_true_m, "OpenFOAM |U| [m/s]", vmin, vmax, field_cmap),
+        (speed_pred_m, "Predicted |U| [m/s]", vmin, vmax, field_cmap),
+        (err_m, "Vector error |U_pred - U_OF| [m/s]", 0.0, emax, error_cmap),
     ]
 
-    for ax, (field, title, lo, hi) in zip(axes, panels):
+    for ax, (field, title, lo, hi, cmap) in zip(axes, panels):
         im = ax.imshow(
             field,
             origin="lower",
@@ -190,43 +215,51 @@ def evaluate_plot_fields_comparison(
     uy_true: np.ndarray,
     uy_pred: np.ndarray,
     case_label: str,
+    error_limits: dict[str, float] | None = None,
 ) -> None:
     x = xy[:, :, 0]
     y = xy[:, :, 1]
 
-    def prep(true_arr: np.ndarray, pred_arr: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float, float]:
+    def prep(true_arr: np.ndarray, pred_arr: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
         true_m = evaluate_mask_to_nan(true_arr, fluid_mask)
         pred_m = evaluate_mask_to_nan(pred_arr, fluid_mask)
-        err = np.abs(pred_arr - true_arr)
+        err = pred_arr - true_arr
         err_m = evaluate_mask_to_nan(err, fluid_mask)
 
         both = np.concatenate([true_arr[fluid_mask], pred_arr[fluid_mask]])
         vmin, vmax = evaluate_robust_limits(both, 1.0, 99.0)
-        emax = float(np.percentile(err[fluid_mask], 99.5))
-        if emax <= 0:
-            emax = float(np.max(err[fluid_mask])) + 1e-6
-        return true_m, pred_m, err_m, vmin, vmax, emax
+        return true_m, pred_m, err_m, vmin, vmax
 
-    p_t, p_p, p_e, p_lo, p_hi, p_ehi = prep(p_true, p_pred)
-    ux_t, ux_p, ux_e, ux_lo, ux_hi, ux_ehi = prep(ux_true, ux_pred)
-    uy_t, uy_p, uy_e, uy_lo, uy_hi, uy_ehi = prep(uy_true, uy_pred)
+    p_t, p_p, p_e, p_lo, p_hi = prep(p_true, p_pred)
+    ux_t, ux_p, ux_e, ux_lo, ux_hi = prep(ux_true, ux_pred)
+    uy_t, uy_p, uy_e, uy_lo, uy_hi = prep(uy_true, uy_pred)
 
-    cmap = _evaluate_blue_to_red_colormap()
+    limits = (
+        error_limits
+        if error_limits is not None
+        else {
+            "p": evaluate_symmetric_error_limit(p_e[fluid_mask]),
+            "ux": evaluate_symmetric_error_limit(ux_e[fluid_mask]),
+            "uy": evaluate_symmetric_error_limit(uy_e[fluid_mask]),
+        }
+    )
+    field_cmap = _evaluate_colormap(ABSOLUTE_FIELD_CMAP)
+    difference_cmap = _evaluate_colormap(DIFFERENCE_CMAP)
 
     fig, axes = plt.subplots(3, 3, figsize=(15, 12), constrained_layout=True)
     fields = [
-        (p_t, "OpenFOAM p [OpenFOAM kinematic-pressure units]", p_lo, p_hi),
-        (p_p, "Predicted p [OpenFOAM kinematic-pressure units]", p_lo, p_hi),
-        (p_e, "|p_pred - p_true|", 0.0, p_ehi),
-        (ux_t, "OpenFOAM Ux [m/s]", ux_lo, ux_hi),
-        (ux_p, "Predicted Ux [m/s]", ux_lo, ux_hi),
-        (ux_e, "|Ux_pred - Ux_true| [m/s]", 0.0, ux_ehi),
-        (uy_t, "OpenFOAM Uy [m/s]", uy_lo, uy_hi),
-        (uy_p, "Predicted Uy [m/s]", uy_lo, uy_hi),
-        (uy_e, "|Uy_pred - Uy_true| [m/s]", 0.0, uy_ehi),
+        (p_t, "OpenFOAM p [OpenFOAM kinematic-pressure units]", p_lo, p_hi, field_cmap),
+        (p_p, "Predicted p [OpenFOAM kinematic-pressure units]", p_lo, p_hi, field_cmap),
+        (p_e, "p_pred - p_true [OpenFOAM kinematic-pressure units]", -limits["p"], limits["p"], difference_cmap),
+        (ux_t, "OpenFOAM Ux [m/s]", ux_lo, ux_hi, field_cmap),
+        (ux_p, "Predicted Ux [m/s]", ux_lo, ux_hi, field_cmap),
+        (ux_e, "Ux_pred - Ux_true [m/s]", -limits["ux"], limits["ux"], difference_cmap),
+        (uy_t, "OpenFOAM Uy [m/s]", uy_lo, uy_hi, field_cmap),
+        (uy_p, "Predicted Uy [m/s]", uy_lo, uy_hi, field_cmap),
+        (uy_e, "Uy_pred - Uy_true [m/s]", -limits["uy"], limits["uy"], difference_cmap),
     ]
 
-    for ax, (field, title, lo, hi) in zip(axes.flat, fields):
+    for ax, (field, title, lo, hi, cmap) in zip(axes.flat, fields):
         im = ax.imshow(
             field,
             origin="lower",
