@@ -47,6 +47,13 @@ from src.evaluate_plotting import (
 )
 from src.ml_data_split import build_train_val_split
 from src.ml_dataset import AirfoilFlowDataset, parse_case_params
+from src.ml_supervised import (
+    RAW_TARGETS,
+    normalize_physical_targets,
+    supervised_config_from_checkpoint,
+    targets_to_physical,
+)
+from src.ml_supervised import near_wall_region_mask, wake_region_mask
 from src.ml_models import build_model
 from src.ml_device import log_device, resolve_device
 from src.ml_protocols import PhysicsLossModel
@@ -54,7 +61,10 @@ from src.ml_training import compute_grid_spacing_from_xy, masked_mse
 
 
 @torch.no_grad()
-def run_validation(device_requested: str | None = None) -> None:
+def run_validation(
+    device_requested: str | None = None,
+    experiment_name: str | None = None,
+) -> None:
     config_path = PROJECT_ROOT / "configs" / "paths.yaml"
     ml_config_path = PROJECT_ROOT / "configs" / "ml_models_config.yaml"
 
@@ -64,12 +74,13 @@ def run_validation(device_requested: str | None = None) -> None:
     data_dir = paths.flow_fields_output
     model_name = ml_cfg.model.name
     model_filename = ml_cfg.output.filename_template.format(model_name=model_name)
-    model_path = paths.project_root / ml_cfg.output.models_subdir / model_name / model_filename
+    checkpoint_subdir = experiment_name or model_name
+    model_path = paths.project_root / ml_cfg.output.models_subdir / checkpoint_subdir / model_filename
     legacy_model_path = paths.project_root / ml_cfg.output.models_subdir / model_filename
     if not model_path.exists() and legacy_model_path.exists():
         model_path = legacy_model_path
 
-    validation_root = paths.project_root / ml_cfg.output.models_subdir / f"{model_name}_validation"
+    validation_root = paths.project_root / ml_cfg.output.models_subdir / f"{checkpoint_subdir}_validation"
     metrics_dir = validation_root / "metrics"
     velocity_fig_dir = validation_root / "velocity_figures"
     field_fig_dir = validation_root / "field_figures"
@@ -92,6 +103,9 @@ def run_validation(device_requested: str | None = None) -> None:
     except TypeError:
         loaded = torch.load(model_path, map_location="cpu")
     checkpoint = loaded if isinstance(loaded, dict) and "model_state_dict" in loaded else None
+    dataset.supervised_config = supervised_config_from_checkpoint(checkpoint)
+    target_representation = dataset.supervised_config.target_representation
+    raw_metric_stats: dict[str, float]
     if checkpoint and checkpoint.get("test_case_ids"):
         case_ids = [path.parent.name for path in dataset.files]
         id_to_idx = {case_id: idx for idx, case_id in enumerate(case_ids)}
@@ -99,12 +113,22 @@ def run_validation(device_requested: str | None = None) -> None:
         if missing:
             raise RuntimeError(f"Saved test cases are missing from dataset: {missing}")
         val_indices = [id_to_idx[case_id] for case_id in checkpoint["test_case_ids"]]
+        development_indices = [
+            id_to_idx[case_id] for case_id in checkpoint.get("development_case_ids", [])
+        ]
         val_set = Subset(dataset, val_indices)
         train_size = len(checkpoint.get("development_case_ids", []))
         val_size = len(val_indices)
         for key in ("aoa_mean", "aoa_std", "inlet_u_mean", "inlet_u_std", "p_mean",
                     "p_std", "ux_mean", "ux_std", "uy_mean", "uy_std"):
             setattr(dataset, key, float(checkpoint[key]))
+        if target_representation == RAW_TARGETS:
+            raw_metric_stats = {
+                key: float(checkpoint[key])
+                for key in ("p_mean", "p_std", "ux_mean", "ux_std", "uy_mean", "uy_std")
+            }
+        else:
+            raw_metric_stats = dataset.compute_raw_target_normalization(development_indices)
     else:
         split = build_train_val_split(dataset, ml_cfg.training.validation_split,
                                       ml_cfg.training.split_seed)
@@ -113,6 +137,10 @@ def run_validation(device_requested: str | None = None) -> None:
         train_size, val_size = split.train_size, split.val_size
         dataset.fit_condition_normalization(split.train_indices)
         dataset.fit_target_normalization(split.train_indices)
+        raw_metric_stats = {
+            key: float(getattr(dataset, key))
+            for key in ("p_mean", "p_std", "ux_mean", "ux_std", "uy_mean", "uy_std")
+        }
 
     if len(val_set) == 0:
         raise RuntimeError("Validation set is empty after split.")
@@ -187,15 +215,37 @@ def run_validation(device_requested: str | None = None) -> None:
                 meta = evaluate_extract_case_meta(npz, npz_path, parsed)
 
             mask_batch = torch.from_numpy(fluid_mask.astype(np.float32)).unsqueeze(0).unsqueeze(0)
-            normalized_loss = float(masked_mse(pred_batch, target_batch, mask_batch).item())
+            native_objective = float(masked_mse(pred_batch, target_batch, mask_batch).item())
 
-            p_pred = pred_np[0] * dataset.p_std + dataset.p_mean
-            ux_pred = pred_np[1] * dataset.ux_std + dataset.ux_mean
-            uy_pred = pred_np[2] * dataset.uy_std + dataset.uy_mean
+            if target_representation == RAW_TARGETS:
+                p_pred = pred_np[0] * dataset.p_std + dataset.p_mean
+                ux_pred = pred_np[1] * dataset.ux_std + dataset.ux_mean
+                uy_pred = pred_np[2] * dataset.uy_std + dataset.uy_mean
+                p_target = target_np[0] * dataset.p_std + dataset.p_mean
+                ux_target = target_np[1] * dataset.ux_std + dataset.ux_mean
+                uy_target = target_np[2] * dataset.uy_std + dataset.uy_mean
+            else:
+                inlet_velocity = float(meta["inlet_velocity"])
+                p_pred, ux_pred, uy_pred = targets_to_physical(
+                    pred_np, inlet_velocity, target_representation,
+                    dataset.supervised_config.p_inf,
+                )
+                p_target, ux_target, uy_target = targets_to_physical(
+                    target_np, inlet_velocity, target_representation,
+                    dataset.supervised_config.p_inf,
+                )
 
-            p_target = target_np[0] * dataset.p_std + dataset.p_mean
-            ux_target = target_np[1] * dataset.ux_std + dataset.ux_mean
-            uy_target = target_np[2] * dataset.uy_std + dataset.uy_mean
+            physical_pred_norm = normalize_physical_targets(
+                p_pred, ux_pred, uy_pred, raw_metric_stats,
+            )
+            physical_true_norm = normalize_physical_targets(
+                p_true, ux_true, uy_true, raw_metric_stats,
+            )
+            common_normalized_masked_mse = float(masked_mse(
+                torch.from_numpy(physical_pred_norm).unsqueeze(0),
+                torch.from_numpy(physical_true_norm).unsqueeze(0),
+                mask_batch,
+            ).item())
 
             dx, dy = compute_grid_spacing_from_xy(torch.from_numpy(xy.astype(np.float32)))
 
@@ -248,7 +298,7 @@ def run_validation(device_requested: str | None = None) -> None:
                 aoa_deg=float(meta["aoa_deg"]),
                 inlet_velocity_mps=float(meta["inlet_velocity"]),
                 latest_time=str(meta["latest_time"]),
-                normalized_masked_mse=normalized_loss,
+                normalized_masked_mse=common_normalized_masked_mse,
                 p_pred=p_pred,
                 p_true=p_true,
                 ux_pred=ux_pred,
@@ -264,7 +314,36 @@ def run_validation(device_requested: str | None = None) -> None:
                 momentum_x_loss=momentum_x_loss,
                 momentum_y_loss=momentum_y_loss,
             )
-            rows.append(evaluate_case_metrics_to_row(case_metrics))
+            case_row = evaluate_case_metrics_to_row(case_metrics)
+            # Keep the legacy column as a backwards-compatible alias, but expose
+            # unambiguous names for cross-representation comparisons.
+            case_row["native_objective"] = native_objective
+            case_row["common_normalized_masked_mse"] = common_normalized_masked_mse
+            wall_region = near_wall_region_mask(
+                xy, fluid_mask, float(meta["chord"]),
+                dataset.supervised_config.wall_distance_fraction,
+            )
+            wake_region = wake_region_mask(
+                xy, fluid_mask, float(meta["chord"]), float(meta["aoa_deg"]),
+                dataset.supervised_config.wake_x_start, dataset.supervised_config.wake_x_end,
+                dataset.supervised_config.wake_half_height,
+            )
+            outer_region = fluid_mask & ~wall_region & ~wake_region
+            for region_name, region in (
+                ("global", fluid_mask), ("near_wall", wall_region),
+                ("wake", wake_region), ("outer", outer_region),
+            ):
+                if not np.any(region):
+                    for quantity in ("p", "ux", "uy", "velocity_vector"):
+                        case_row[f"{region_name}_{quantity}_rmse"] = float("nan")
+                    continue
+                case_row[f"{region_name}_p_rmse"] = float(np.sqrt(np.mean((p_pred[region] - p_true[region]) ** 2)))
+                case_row[f"{region_name}_ux_rmse"] = float(np.sqrt(np.mean((ux_pred[region] - ux_true[region]) ** 2)))
+                case_row[f"{region_name}_uy_rmse"] = float(np.sqrt(np.mean((uy_pred[region] - uy_true[region]) ** 2)))
+                case_row[f"{region_name}_velocity_vector_rmse"] = float(
+                    np.sqrt(np.mean(velocity_vector_error[region] ** 2))
+                )
+            rows.append(case_row)
 
             evaluate_update_global_aggregator(
                 agg=global_agg,
@@ -293,7 +372,7 @@ def run_validation(device_requested: str | None = None) -> None:
                 f"AoA={float(meta['aoa_deg']):.3f} deg | U_in={float(meta['inlet_velocity']):.3f} m/s"
             )
             subtitle = (
-                f"normalized masked MSE={normalized_loss:.6e} | "
+                f"common normalized masked MSE={common_normalized_masked_mse:.6e} | "
                 f"velocity vector RMSE={case_metrics.velocity_vector_rmse_mps:.6e} m/s | "
                 "sampling locations are orientational"
             )
@@ -467,6 +546,17 @@ def run_validation(device_requested: str | None = None) -> None:
 
         summary = {
             "model_name": model_name,
+            "experiment_name": checkpoint_subdir,
+            "target_representation": target_representation,
+            "metric_semantics": {
+                "native_objective": "masked MSE in the checkpoint's training-target space",
+                "common_normalized_masked_mse": (
+                    "masked MSE after physical decoding and train-only raw-field z-scoring"
+                ),
+                "normalized_masked_mse": "backwards-compatible alias of common_normalized_masked_mse",
+            },
+            "common_raw_normalization": raw_metric_stats,
+            "common_raw_normalization_population": "checkpoint development_case_ids only",
             "evaluation_split": "test" if checkpoint else "legacy_validation",
             "model_path": str(model_path),
             "data_dir": str(data_dir),
@@ -507,6 +597,17 @@ def run_validation(device_requested: str | None = None) -> None:
     else:
         summary = {
             "model_name": model_name,
+            "experiment_name": checkpoint_subdir,
+            "target_representation": target_representation,
+            "metric_semantics": {
+                "native_objective": "masked MSE in the checkpoint's training-target space",
+                "common_normalized_masked_mse": (
+                    "masked MSE after physical decoding and train-only raw-field z-scoring"
+                ),
+                "normalized_masked_mse": "backwards-compatible alias of common_normalized_masked_mse",
+            },
+            "common_raw_normalization": raw_metric_stats,
+            "common_raw_normalization_population": "training split only",
             "evaluation_split": "test" if checkpoint else "legacy_validation",
             "model_path": str(model_path),
             "data_dir": str(data_dir),
@@ -547,7 +648,11 @@ def run_validation(device_requested: str | None = None) -> None:
         print("[VALIDATION SUMMARY]")
         print(f"Model: {model_name}")
         print(f"Cases: {len(metrics_df)}")
-        print(f"Normalized masked MSE: mean={metrics_df['normalized_masked_mse'].mean():.6e}")
+        print(
+            "Common normalized masked MSE: "
+            f"mean={metrics_df['common_normalized_masked_mse'].mean():.6e}"
+        )
+        print(f"Native objective: mean={metrics_df['native_objective'].mean():.6e}")
         print(f"Pressure RMSE: mean={metrics_df['p_rmse'].mean():.6e}")
         print(f"Ux RMSE: mean={metrics_df['ux_rmse_mps'].mean():.6e}")
         print(f"Uy RMSE: mean={metrics_df['uy_rmse_mps'].mean():.6e}")
@@ -595,8 +700,12 @@ def run_validation(device_requested: str | None = None) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate a trained flow-field model.")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default=None)
+    parser.add_argument(
+        "--experiment-name", default=None,
+        help="Checkpoint/output subdirectory; defaults to the model name for legacy baselines.",
+    )
     args = parser.parse_args()
-    run_validation(args.device)
+    run_validation(args.device, args.experiment_name)
 
 
 if __name__ == "__main__":

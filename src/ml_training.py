@@ -4,6 +4,7 @@ import torch
 from typing import cast
 
 from src.ml_protocols import PhysicsLossModel
+from src.ml_supervised import SupervisedLossConfig, build_region_weights, gradient_matching_loss
 
 
 def masked_mse(
@@ -77,6 +78,73 @@ def evaluate(model, loader, device: torch.device) -> float:
         total_loss += loss.item()
 
     return total_loss / len(loader)
+
+
+def supervised_loss_components(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    fluid_mask: torch.Tensor,
+    regions: torch.Tensor,
+    config: SupervisedLossConfig,
+    dx: float,
+    dy: float,
+) -> dict[str, torch.Tensor]:
+    wall, wake, outer = regions[:, 0:1], regions[:, 1:2], regions[:, 2:3]
+    weights = build_region_weights(
+        fluid_mask, wall, wake, config.wall_weight, config.wake_weight
+    )
+    squared = (pred - target).square()
+    data_loss = (squared * weights).sum() / (weights.sum() * pred.shape[1] + 1e-8)
+    global_loss = masked_mse(pred, target, fluid_mask)
+
+    def region_loss(region: torch.Tensor) -> torch.Tensor:
+        return (squared * region).sum() / (region.sum() * pred.shape[1] + 1e-8)
+
+    grad_loss = gradient_matching_loss(
+        pred, target, fluid_mask, dx, dy, config.gradient_channel_weights
+    )
+    return {
+        "total_loss": data_loss + config.gradient_loss_weight * grad_loss,
+        "data_loss": data_loss,
+        "gradient_loss": grad_loss,
+        "global_data_loss": global_loss,
+        "near_wall_data_loss": region_loss(wall),
+        "wake_data_loss": region_loss(wake),
+        "outer_data_loss": region_loss(outer),
+    }
+
+
+def run_supervised_epoch(
+    model: torch.nn.Module,
+    loader,
+    device: torch.device,
+    config: SupervisedLossConfig,
+    dx: float,
+    dy: float,
+    optimizer: torch.optim.Optimizer | None = None,
+) -> dict[str, float]:
+    training = optimizer is not None
+    model.train(training)
+    totals: dict[str, float] = {}
+    for batch in loader:
+        if len(batch) != 4:
+            raise RuntimeError("Improved supervised mode requires dataset region masks")
+        inp, target, mask, regions = (
+            value.to(device, non_blocking=device.type == "cuda") for value in batch
+        )
+        with torch.set_grad_enabled(training):
+            losses = supervised_loss_components(model(inp), target, mask, regions, config, dx, dy)
+            if not torch.isfinite(losses["total_loss"]):
+                raise RuntimeError("Non-finite improved supervised loss")
+            if optimizer is not None:
+                optimizer.zero_grad()
+                losses["total_loss"].backward()
+                optimizer.step()
+        for key, value in losses.items():
+            totals[key] = totals.get(key, 0.0) + float(value.detach().item())
+    if len(loader) == 0:
+        raise RuntimeError("Supervised loader has zero batches")
+    return {key: value / len(loader) for key, value in totals.items()}
 
 
 def train_one_epoch_physics(

@@ -28,7 +28,8 @@ from src.ml_experiment import experiment_mode, run_cross_validation, write_exper
 from src.ml_hyperparameter_search import generate_search_configurations
 from src.ml_models import AVAILABLE_MODELS, build_model
 from src.ml_device import loader_device_kwargs, log_device, resolve_device
-from src.ml_training import evaluate, train_one_epoch, train_one_epoch_physics
+from src.ml_training import evaluate, run_supervised_epoch, train_one_epoch, train_one_epoch_physics
+from src.ml_supervised import RAW_TARGETS, SupervisedLossConfig
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -181,7 +182,8 @@ def train_clcd(dataset: AirfoilClCdDataset, train_indices: Sequence[int],
 def train_field(dataset: AirfoilFlowDataset, model_name: str,
                 train_indices: Sequence[int], eval_indices: Sequence[int],
                 hp: Mapping[str, Any], device: torch.device, seed: int,
-                dx: float, dy: float, epochs: int) -> tuple[torch.nn.Module, dict[str, float]]:
+                dx: float, dy: float, epochs: int,
+                supervised_config: SupervisedLossConfig | None = None) -> tuple[torch.nn.Module, dict[str, float]]:
     seed_everything(seed)
     fit_normalization(dataset, model_name, train_indices)
     batch = int(hp["batch_size"])
@@ -206,8 +208,21 @@ def train_field(dataset: AirfoilFlowDataset, model_name: str,
                 dataset.uy_mean, dataset.uy_std, physics_weight,
                 ML_CFG.physics_loss.pressure_is_kinematic, ML_CFG.physics_loss.mask_erode_pixels,
             )
+        elif supervised_config is not None and supervised_config.target_representation != RAW_TARGETS:
+            diagnostics = run_supervised_epoch(
+                model, train_loader, device, supervised_config, dx, dy, optimizer
+            )
+            print(
+                f"[TRAIN] epoch={epoch + 1}/{epochs} "
+                + " ".join(f"{key}={value:.6e}" for key, value in diagnostics.items())
+            )
         else:
             train_one_epoch(model, train_loader, optimizer, device)
+    if supervised_config is not None and supervised_config.target_representation != RAW_TARGETS:
+        diagnostics = run_supervised_epoch(
+            model, eval_loader, device, supervised_config, dx, dy, optimizer=None
+        )
+        return model, {"objective": diagnostics["total_loss"], **diagnostics}
     objective = evaluate(model, eval_loader, device)
     return model, {"objective": float(objective), "normalized_masked_mse": float(objective)}
 
@@ -242,16 +257,30 @@ def main() -> None:
         )
         dx = dy = 0.0
     else:
-        dataset = AirfoilFlowDataset(PATHS.flow_fields_output)
+        supervised_config = (
+            experiment.supervised_loss if model_name == "simple_unet" else SupervisedLossConfig()
+        )
+        improved_supervision = (
+            model_name == "simple_unet"
+            and supervised_config.target_representation != RAW_TARGETS
+        )
+        dataset = AirfoilFlowDataset(
+            PATHS.flow_fields_output,
+            supervised_config=supervised_config,
+            return_regions=improved_supervision,
+        )
         with np.load(dataset.files[0], allow_pickle=False) as raw:
             xy = raw["xy"]
         dx = float(np.median(np.abs(np.diff(xy[:, :, 0], axis=1))[np.abs(np.diff(xy[:, :, 0], axis=1)) > 0]))
         dy = float(np.median(np.abs(np.diff(xy[:, :, 1], axis=0))[np.abs(np.diff(xy[:, :, 1], axis=0)) > 0]))
 
     case_ids = case_ids_for(dataset, model_name)
-    model_root = PATHS.project_root / ML_CFG.output.models_subdir / model_name
+    baseline_model_root = PATHS.project_root / ML_CFG.output.models_subdir / model_name
+    model_root = PATHS.project_root / ML_CFG.output.models_subdir / (
+        experiment.output_name or model_name
+    )
     output_dir = model_root / "smoke_test" if args.smoke_test else model_root
-    fixed_split_path = model_root / "fixed_test_split.json"
+    fixed_split_path = baseline_model_root / "fixed_test_split.json"
     split_existed = fixed_split_path.exists()
     split = load_or_create_fixed_test_split(
         case_ids, fixed_split_path, split_cfg.test_fraction,
@@ -295,8 +324,11 @@ def main() -> None:
         if model_name == "clcd_mlp":
             return train_clcd(dataset, fold.train_indices, fold.val_indices, hp, device,
                               fold_seed, epochs)[1]
-        return train_field(dataset, model_name, fold.train_indices, fold.val_indices,
-                           hp, device, fold_seed, dx, dy, epochs)[1]
+        return train_field(
+            dataset, model_name, fold.train_indices, fold.val_indices,
+            hp, device, fold_seed, dx, dy, epochs,
+            experiment.supervised_loss if model_name == "simple_unet" else None,
+        )[1]
 
     if mode == "single_run":
         validation_metrics = dict(run_fold(configurations[0].hyperparameters, folds[0]))
@@ -331,6 +363,7 @@ def main() -> None:
         final_model, test_metrics = train_field(
             dataset, model_name, split.development_indices, split.test_indices,
             best_hp, device, final_seed, dx, dy, epochs,
+            experiment.supervised_loss if model_name == "simple_unet" else None,
         )
     checkpoint = {
         "model_name": model_name,
@@ -354,6 +387,13 @@ def main() -> None:
         "runtime_device_selected": device.type,
         "pytorch_version": torch.__version__,
         "cuda_runtime_version": torch.version.cuda,
+        "target_representation": (
+            experiment.supervised_loss.target_representation
+            if model_name == "simple_unet" else RAW_TARGETS
+        ),
+        "supervised_loss_config": (
+            experiment.supervised_loss.metadata() if model_name == "simple_unet" else None
+        ),
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = output_dir / ML_CFG.output.filename_template.format(model_name=model_name)

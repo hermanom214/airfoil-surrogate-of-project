@@ -15,6 +15,15 @@ import torch
 from torch.utils.data import Dataset
 
 from src.ml_quality_filter import load_excluded_cases
+from src.evaluate_io import evaluate_parse_params_json
+from src.ml_supervised import (
+    NONDIMENSIONAL_TARGETS,
+    RAW_TARGETS,
+    SupervisedLossConfig,
+    physical_to_targets,
+    near_wall_region_mask,
+    wake_region_mask,
+)
 
 
 def parse_case_params(filename: str) -> tuple[float, float] | None:
@@ -42,7 +51,12 @@ def parse_case_params(filename: str) -> tuple[float, float] | None:
 class AirfoilFlowDataset(Dataset):
     """Dataset that loads inspected flow-field NPZ files from case directories."""
 
-    def __init__(self, data_dir: Path):
+    def __init__(
+        self,
+        data_dir: Path,
+        supervised_config: SupervisedLossConfig | None = None,
+        return_regions: bool = False,
+    ):
         # Collect and sort all flow-field files in the given directory
         all_files = sorted(data_dir.glob("*/*.npz"))
         excluded_cases = load_excluded_cases(data_dir)
@@ -58,6 +72,9 @@ class AirfoilFlowDataset(Dataset):
         self.ux_std = 1.0
         self.uy_mean = 0.0
         self.uy_std = 1.0
+        self.supervised_config = supervised_config or SupervisedLossConfig()
+        self.return_regions = return_regions
+        self._packed_wall_masks: dict[int, tuple[np.ndarray, tuple[int, int]]] = {}
 
         for path in all_files:
             if path.parent.name in excluded_cases:
@@ -122,6 +139,21 @@ class AirfoilFlowDataset(Dataset):
             indices: Dataset indices used to estimate mean/std. If None, all
                      currently valid dataset samples are used.
         """
+        supervised_config = getattr(self, "supervised_config", SupervisedLossConfig())
+        if supervised_config.target_representation == NONDIMENSIONAL_TARGETS:
+            self.p_mean = self.ux_mean = self.uy_mean = 0.0
+            self.p_std = self.ux_std = self.uy_std = 1.0
+            return
+
+        stats = self.compute_raw_target_normalization(indices)
+        for name, value in stats.items():
+            setattr(self, name, value)
+
+    def compute_raw_target_normalization(
+        self, indices: Sequence[int] | None = None,
+    ) -> dict[str, float]:
+        """Return train-subset raw p/U statistics, independent of target mode."""
+
         if indices is None:
             selected_indices = list(range(len(self.files)))
         else:
@@ -156,17 +188,22 @@ class AirfoilFlowDataset(Dataset):
         if count == 0:
             raise RuntimeError("Cannot fit target normalization: no fluid cells found")
 
-        self.p_mean = p_sum / count
-        self.ux_mean = ux_sum / count
-        self.uy_mean = uy_sum / count
+        p_mean = p_sum / count
+        ux_mean = ux_sum / count
+        uy_mean = uy_sum / count
 
-        p_var = max(p_sumsq / count - self.p_mean ** 2, 0.0)
-        ux_var = max(ux_sumsq / count - self.ux_mean ** 2, 0.0)
-        uy_var = max(uy_sumsq / count - self.uy_mean ** 2, 0.0)
+        p_var = max(p_sumsq / count - p_mean ** 2, 0.0)
+        ux_var = max(ux_sumsq / count - ux_mean ** 2, 0.0)
+        uy_var = max(uy_sumsq / count - uy_mean ** 2, 0.0)
 
-        self.p_std = float(np.sqrt(p_var) + 1e-8)
-        self.ux_std = float(np.sqrt(ux_var) + 1e-8)
-        self.uy_std = float(np.sqrt(uy_var) + 1e-8)
+        return {
+            "p_mean": float(p_mean),
+            "p_std": float(np.sqrt(p_var) + 1e-8),
+            "ux_mean": float(ux_mean),
+            "ux_std": float(np.sqrt(ux_var) + 1e-8),
+            "uy_mean": float(uy_mean),
+            "uy_std": float(np.sqrt(uy_var) + 1e-8),
+        }
 
     def __len__(self) -> int:
         # Return total number of flow-field samples
@@ -186,6 +223,7 @@ class AirfoilFlowDataset(Dataset):
             p = data["p"].astype(np.float32)
             U = data["U"].astype(np.float32)
             mask = data["fluid_mask"].astype(np.float32)
+            params_meta = evaluate_parse_params_json(data["params"] if "params" in data.files else None)
 
         # Parse flow conditions from the filename
         params = parse_case_params(path.name)
@@ -220,18 +258,42 @@ class AirfoilFlowDataset(Dataset):
             axis=0,
         )
 
-        # Stack normalised target fields into shape (3, H, W)
-        target = np.stack(
-            [
-                (p - self.p_mean) / self.p_std,
-                (U[:, :, 0] - self.ux_mean) / self.ux_std,
-                (U[:, :, 1] - self.uy_mean) / self.uy_std,
-            ],
-            axis=0,
+        target = physical_to_targets(
+            p, U[:, :, 0], U[:, :, 1], inlet_u,
+            self.supervised_config.target_representation,
+            self.supervised_config.p_inf,
         )
+        if self.supervised_config.target_representation == RAW_TARGETS:
+            target = (target - np.asarray(
+                [self.p_mean, self.ux_mean, self.uy_mean], dtype=np.float32
+            )[:, None, None]) / np.asarray(
+                [self.p_std, self.ux_std, self.uy_std], dtype=np.float32
+            )[:, None, None]
 
-        return (
+        base = (
             torch.from_numpy(inp),
             torch.from_numpy(target),
             torch.from_numpy(mask[None, :, :]),  # mask: (1, H, W)
         )
+        if not self.return_regions:
+            return base
+
+        chord = float(params_meta.get("chord", 1.0))
+        naca_match = re.search(r"naca(\d{4})", path.parent.name)
+        naca_code = str(params_meta.get("naca_code") or (naca_match.group(1) if naca_match else ""))
+        if not naca_code:
+            raise RuntimeError(f"Cannot determine NACA code for {path}")
+        if idx not in self._packed_wall_masks:
+            wall = near_wall_region_mask(
+                xy, mask, chord, self.supervised_config.wall_distance_fraction
+            )
+            self._packed_wall_masks[idx] = (np.packbits(wall.reshape(-1)), wall.shape)
+        packed, shape = self._packed_wall_masks[idx]
+        wall = np.unpackbits(packed, count=shape[0] * shape[1]).reshape(shape).astype(bool)
+        wake = wake_region_mask(
+            xy, mask, chord, aoa, self.supervised_config.wake_x_start,
+            self.supervised_config.wake_x_end, self.supervised_config.wake_half_height,
+        )
+        outer = (mask > 0.5) & ~wall & ~wake
+        regions = np.stack((wall, wake, outer), axis=0).astype(np.float32)
+        return (*base, torch.from_numpy(regions))

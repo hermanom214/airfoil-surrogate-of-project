@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any
 import yaml
 
+from src.ml_supervised import SupervisedLossConfig
+
 
 @dataclass
 class ProjectPaths:
@@ -168,6 +170,8 @@ class MLHyperparameterSearchConfig:
 class MLExperimentConfig:
     data_split: MLDataSplitConfig
     hyperparameter_search: MLHyperparameterSearchConfig
+    output_name: str | None = None
+    supervised_loss: SupervisedLossConfig = field(default_factory=SupervisedLossConfig)
 
 
 @dataclass
@@ -411,15 +415,29 @@ def load_ml_models_config(config_path: Path) -> MLModelsConfig:
 
     global_split = parse_split({})
     global_search = parse_search({})
-    experiments = {
-        str(name): MLExperimentConfig(
-            data_split=parse_split((overrides or {}).get("data_split", {})),
-            hyperparameter_search=parse_search(
-                (overrides or {}).get("hyperparameter_search", {})
+    experiments = {}
+    for name, raw_overrides in data.get("experiments", {}).items():
+        overrides = raw_overrides or {}
+        loss = overrides.get("loss", {}) or {}
+        experiments[str(name)] = MLExperimentConfig(
+            data_split=parse_split(overrides.get("data_split", {})),
+            hyperparameter_search=parse_search(overrides.get("hyperparameter_search", {})),
+            output_name=(None if overrides.get("output_name") is None else str(overrides["output_name"])),
+            supervised_loss=SupervisedLossConfig(
+                target_representation=str(overrides.get("target_representation", "raw")),
+                wall_weight=float(loss.get("wall_weight", 0.0)),
+                wake_weight=float(loss.get("wake_weight", 0.0)),
+                wall_distance_fraction=float(loss.get("wall_distance_fraction", 0.05)),
+                wake_x_start=float(loss.get("wake_x_start", 0.9)),
+                wake_x_end=float(loss.get("wake_x_end", 1.75)),
+                wake_half_height=float(loss.get("wake_half_height", 0.20)),
+                gradient_loss_weight=float(loss.get("gradient_loss_weight", 0.0)),
+                gradient_channel_weights=tuple(float(v) for v in loss.get(
+                    "gradient_channel_weights", [1.0, 1.0, 1.0]
+                )),
+                p_inf=float(loss.get("p_inf", 0.0)),
             ),
         )
-        for name, overrides in data.get("experiments", {}).items()
-    }
 
     return MLModelsConfig(
         device=device,
