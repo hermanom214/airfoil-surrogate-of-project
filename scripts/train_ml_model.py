@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
 import sys
@@ -40,6 +41,10 @@ ML_CFG = load_ml_models_config(ROOT / "configs" / "ml_models_config.yaml")
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", choices=AVAILABLE_MODELS, default=ML_CFG.model.name)
+    parser.add_argument(
+        "--experiment-config", default=None,
+        help="Named entry under configs/ml_models_config.yaml:experiments; defaults to the model name.",
+    )
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default=ML_CFG.device)
     parser.add_argument(
         "--epochs", type=int, default=None,
@@ -63,6 +68,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--smoke-test", action="store_true",
         help="Run the same workflow with 2 folds, at most 2 candidates and 2 epochs.",
+    )
+    parser.add_argument(
+        "--preflight-only", action="store_true",
+        help="Validate the fixed split and collision guards, print the resolved experiment, then exit.",
     )
     return parser.parse_args(argv)
 
@@ -208,7 +217,7 @@ def train_field(dataset: AirfoilFlowDataset, model_name: str,
                 dataset.uy_mean, dataset.uy_std, physics_weight,
                 ML_CFG.physics_loss.pressure_is_kinematic, ML_CFG.physics_loss.mask_erode_pixels,
             )
-        elif supervised_config is not None and supervised_config.target_representation != RAW_TARGETS:
+        elif supervised_config is not None and supervised_config != SupervisedLossConfig():
             diagnostics = run_supervised_epoch(
                 model, train_loader, device, supervised_config, dx, dy, optimizer
             )
@@ -218,7 +227,7 @@ def train_field(dataset: AirfoilFlowDataset, model_name: str,
             )
         else:
             train_one_epoch(model, train_loader, optimizer, device)
-    if supervised_config is not None and supervised_config.target_representation != RAW_TARGETS:
+    if supervised_config is not None and supervised_config != SupervisedLossConfig():
         diagnostics = run_supervised_epoch(
             model, eval_loader, device, supervised_config, dx, dy, optimizer=None
         )
@@ -232,7 +241,10 @@ def main() -> None:
     if args.epochs is not None and args.epochs <= 0:
         raise ValueError("--epochs must be a positive integer")
     model_name = args.model
-    experiment = ML_CFG.experiment_for(model_name)
+    experiment_key = args.experiment_config or model_name
+    if args.experiment_config and experiment_key not in ML_CFG.experiments:
+        raise ValueError(f"Unknown experiment config: {experiment_key}")
+    experiment = ML_CFG.experiment_for(experiment_key)
     split_cfg = experiment.data_split
     search_cfg = experiment.hyperparameter_search
     cv_strategy = args.cv_strategy or split_cfg.cv_strategy
@@ -260,10 +272,7 @@ def main() -> None:
         supervised_config = (
             experiment.supervised_loss if model_name == "simple_unet" else SupervisedLossConfig()
         )
-        improved_supervision = (
-            model_name == "simple_unet"
-            and supervised_config.target_representation != RAW_TARGETS
-        )
+        improved_supervision = model_name == "simple_unet" and supervised_config != SupervisedLossConfig()
         dataset = AirfoilFlowDataset(
             PATHS.flow_fields_output,
             supervised_config=supervised_config,
@@ -280,6 +289,14 @@ def main() -> None:
         experiment.output_name or model_name
     )
     output_dir = model_root / "smoke_test" if args.smoke_test else model_root
+    protected_roots = {
+        (PATHS.project_root / ML_CFG.output.models_subdir / name).resolve()
+        for name in ("simple_unet_V0", "simple_unet_improved")
+    }
+    if output_dir.resolve() in protected_roots:
+        raise RuntimeError(f"Refusing to overwrite protected experiment: {output_dir}")
+    if output_dir.exists():
+        raise FileExistsError(f"Experiment output directory already exists: {output_dir}")
     fixed_split_path = baseline_model_root / "fixed_test_split.json"
     split_existed = fixed_split_path.exists()
     split = load_or_create_fixed_test_split(
@@ -291,6 +308,25 @@ def main() -> None:
     )
     if args.regenerate_split and split_existed:
         print(f"[WARN] Fixed test split was explicitly regenerated: {fixed_split_path}")
+    split_sha256 = hashlib.sha256(fixed_split_path.read_bytes()).hexdigest()
+    if len(split.development_indices) != 465 or len(split.test_indices) != 116:
+        raise RuntimeError(
+            "Fixed split count mismatch: expected development/test=465/116, got "
+            f"{len(split.development_indices)}/{len(split.test_indices)}"
+        )
+    checkpoint_path = output_dir / ML_CFG.output.filename_template.format(model_name=model_name)
+    print("[PREFLIGHT]")
+    print(f"experiment_name={experiment.output_name or model_name}")
+    print(f"target_representation={experiment.supervised_loss.target_representation}")
+    print(f"wall_weight={experiment.supervised_loss.wall_weight}")
+    print(f"wake_weight={experiment.supervised_loss.wake_weight}")
+    print(f"gradient_loss_weight={experiment.supervised_loss.gradient_loss_weight}")
+    print(f"checkpoint_destination={checkpoint_path}")
+    print(f"fixed_split_sha256={split_sha256}")
+    print(f"development_count={len(split.development_indices)}")
+    print(f"test_count={len(split.test_indices)}")
+    if args.preflight_only:
+        return
     folds = (
         build_cv_folds(split.development_indices, case_ids, n_folds, split_cfg.seed, cv_strategy)
         if cv_enabled else [build_holdout_fold(
@@ -396,7 +432,6 @@ def main() -> None:
         ),
     }
     output_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = output_dir / ML_CFG.output.filename_template.format(model_name=model_name)
     torch.save(checkpoint, checkpoint_path)
     test_payload = {"split": "test", "used_for_model_selection": False, **test_metrics}
     write_experiment_results(

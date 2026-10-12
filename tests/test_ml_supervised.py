@@ -20,6 +20,14 @@ from src.ml_supervised import (
 )
 
 
+def test_raw_target_ablation_configs_are_not_legacy_defaults() -> None:
+    from src.ml_supervised import SupervisedLossConfig
+
+    baseline = SupervisedLossConfig()
+    assert SupervisedLossConfig(wall_weight=3.0, wake_weight=3.0) != baseline
+    assert SupervisedLossConfig(gradient_loss_weight=0.1) != baseline
+
+
 def test_nondimensional_target_round_trip_and_components() -> None:
     p = np.array([[0.0, 50.0]], dtype=np.float32)
     ux = np.array([[20.0, 10.0]], dtype=np.float32)
