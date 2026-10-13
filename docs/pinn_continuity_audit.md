@@ -73,7 +73,7 @@ For PINN/RANS work, the stored mask is sufficient for centered derivatives and s
 - Per-case exact statistics: `data/pinn_dataset/continuity_audit/per_case_metrics.csv`
 - Aggregate and grouped machine-readable results: `data/pinn_dataset/continuity_audit/aggregate_summary.json`
 - Figures: `data/pinn_dataset/continuity_audit/figures/`
-- Reproduction command: `.venv/Scripts/python.exe scripts/audit_pinn_continuity.py --overwrite`
+- Reproduction command: `.venv/Scripts/python.exe scripts/audit/audit_pinn_continuity.py --overwrite`
 
 Figures:
 

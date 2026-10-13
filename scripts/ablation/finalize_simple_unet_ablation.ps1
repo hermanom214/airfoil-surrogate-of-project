@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Continue'
-$root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$root = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))
 Set-Location -LiteralPath $root
 $logRoot = Join-Path $root 'data\ablation_logs'
 $statusPath = Join-Path $logRoot 'run_status.json'
@@ -16,7 +16,7 @@ while ($true) {
 }
 
 "[$((Get-Date).ToString('o'))] Finalization started" | Set-Content -LiteralPath $finalLog -Encoding utf8
-& .\.venv\Scripts\python.exe scripts\report_simple_unet_ablation.py 2>&1 |
+& .\.venv\Scripts\python.exe scripts\ablation\report_simple_unet_ablation.py 2>&1 |
     Tee-Object -FilePath $finalLog -Append
 $reportExit = $LASTEXITCODE
 & .\.venv\Scripts\python.exe -m pytest -q 2>&1 | Tee-Object -FilePath $finalLog -Append
