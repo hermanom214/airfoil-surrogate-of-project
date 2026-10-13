@@ -224,9 +224,6 @@ class AirfoilFlowDataset(Dataset):
             U = data["U"].astype(np.float32)
             mask = data["fluid_mask"].astype(np.float32)
             params_meta = evaluate_parse_params_json(data["params"] if "params" in data.files else None)
-            artifact_meta = evaluate_parse_params_json(
-                data["metadata"] if "metadata" in data.files else None
-            )
 
         # Parse flow conditions from the filename
         params = parse_case_params(path.name)
@@ -293,12 +290,8 @@ class AirfoilFlowDataset(Dataset):
             self._packed_wall_masks[idx] = (np.packbits(wall.reshape(-1)), wall.shape)
         packed, shape = self._packed_wall_masks[idx]
         wall = np.unpackbits(packed, count=shape[0] * shape[1]).reshape(shape).astype(bool)
-        # Local wake artifacts already store body-frame coordinates.  Applying
-        # the global raster's inverse-AoA transform a second time would rotate
-        # their physical region masks incorrectly.
-        region_aoa = 0.0 if artifact_meta.get("coordinate_frame") == "body" else aoa
         wake = wake_region_mask(
-            xy, mask, chord, region_aoa, self.supervised_config.wake_x_start,
+            xy, mask, chord, aoa, self.supervised_config.wake_x_start,
             self.supervised_config.wake_x_end, self.supervised_config.wake_half_height,
         )
         outer = (mask > 0.5) & ~wall & ~wake
