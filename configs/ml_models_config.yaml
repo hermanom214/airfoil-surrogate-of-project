@@ -8,6 +8,11 @@ model:
       out_channels: 3 # obvykle 3 (p, Ux, Uy)
       encoder_channels: [32, 64, 128] # rozumně [16,32,64] až [64,128,256]
       bottleneck_channels: 256 # typicky 2x až 4x poslední encoder channel
+    unet_pinn:
+      in_channels: 5
+      out_channels: 3
+      encoder_channels: [32, 64, 128]
+      bottleneck_channels: 256
     rans_pinn:
       in_channels: 5 # obvykle 5
       out_channels: 3 # obvykle 3
@@ -41,6 +46,55 @@ hyperparameter_search:
 # Each model selects its own execution mode. Shared split/search values above
 # are inherited, but cv_enabled, n_folds and strategy have one model-local source.
 experiments:
+  unet_pinn:
+    output_name: unet_pinn_phase_a
+    dataset: pinn_dataset
+    loss:
+      supervised_weight: 1.0
+      continuity_weight: 0.1
+      momentum_weight: 0.1
+    data_split: {cv_enabled: false, n_folds: 5}
+    hyperparameter_search: {strategy: none}
+  unet_pinn_supervised:
+    output_name: unet_pinn_supervised
+    dataset: pinn_dataset
+    training:
+      batch_size: 2
+      epochs: 30
+      learning_rate: 0.001
+      weight_decay: 0.0
+      optimizer: adam
+      scheduler: none
+      seed: 42
+      dataloader_seed: 42
+      pilot_epochs: 2
+    loss:
+      supervised_weight: 1.0
+      continuity_weight: 0.0
+      momentum_weight: 0.0
+    selection_metric: supervised_loss
+    data_split: {cv_enabled: false, n_folds: 5}
+    hyperparameter_search: {strategy: none}
+  unet_pinn_physics:
+    output_name: unet_pinn_physics
+    dataset: pinn_dataset
+    training:
+      batch_size: 2
+      epochs: 30
+      learning_rate: 0.001
+      weight_decay: 0.0
+      optimizer: adam
+      scheduler: none
+      seed: 42
+      dataloader_seed: 42
+      pilot_epochs: 2
+    loss:
+      supervised_weight: 1.0
+      continuity_weight: 0.1
+      momentum_weight: 0.1
+    selection_metric: supervised_loss
+    data_split: {cv_enabled: false, n_folds: 5}
+    hyperparameter_search: {strategy: none}
   clcd_mlp:
     data_split: {cv_enabled: false, n_folds: 5}
     hyperparameter_search:

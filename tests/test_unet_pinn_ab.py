@@ -11,7 +11,8 @@ from src.config import load_ml_models_config
 from src.ml_data_split import build_holdout_fold
 from src.ml_models import build_model
 from src.unet_pinn import unet_pinn_losses
-from src.unet_pinn_ab import AB_EXPERIMENTS, compare_metadata, configure_determinism, membership_sha256, state_dict_sha256
+from src.unet_pinn_ab import (AB_EXPERIMENTS, compare_metadata, configure_determinism,
+    cuda_peak_memory, membership_sha256, state_dict_sha256, validate_finite_gradients)
 
 
 CFG = Path("configs/ml_models_config.yaml")
@@ -79,4 +80,67 @@ def test_comparison_rejects_incompatible_split_or_dataset():
 def test_checkpoint_output_collision_guard_is_explicit_in_runner_source():
     source = Path("scripts/train_unet_pinn_ab.py").read_text(encoding="utf-8")
     assert "if output.exists()" in source
+    assert "full_run_with_only_preserved_pilot" in source
     assert "Refusing to overwrite experiment output" in source
+
+
+def test_finite_gradients_allow_step_and_grad_none_is_ignored():
+    model = torch.nn.Sequential(torch.nn.Linear(2, 1), torch.nn.Linear(1, 1))
+    model[1].requires_grad_(False)
+    optimizer = torch.optim.SGD(model.parameters(), lr=.1)
+    loss = model(torch.ones(1, 2)).sum()
+    loss.backward()
+    before = model[0].weight.detach().clone()
+    assert validate_finite_gradients(model) == 2
+    optimizer.step()
+    assert not torch.equal(before, model[0].weight)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_nonfinite_gradient_stops_before_optimizer_step(bad):
+    model = torch.nn.Linear(1, 1, bias=False)
+    optimizer = torch.optim.SGD(model.parameters(), lr=.1)
+    model.weight.grad = torch.tensor([[bad]])
+    before = model.weight.detach().clone()
+    with pytest.raises(RuntimeError, match="weight"):
+        validate_finite_gradients(model)
+    assert torch.equal(before, model.weight)
+    assert optimizer.state == {}
+
+
+def test_nonfinite_total_loss_is_detected_before_backward():
+    source = Path("scripts/train_unet_pinn_ab.py").read_text(encoding="utf-8")
+    finite_check = source.index('if not torch.isfinite(losses["loss_total"])')
+    backward = source.index('losses["loss_total"].backward()')
+    assert finite_check < backward
+
+
+def test_cpu_peak_memory_is_explicitly_unavailable():
+    metrics = cuda_peak_memory(torch.device("cpu"))
+    assert metrics == {
+        "peak_cuda_memory_allocated_bytes": None,
+        "peak_cuda_memory_allocated_mib": None,
+        "peak_cuda_memory_reserved_bytes": None,
+        "peak_cuda_memory_reserved_mib": None,
+    }
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_cuda_peak_allocated_and_reserved_are_recorded():
+    device = torch.device("cuda")
+    torch.cuda.reset_peak_memory_stats(device)
+    tensor = torch.ones(1024, device=device)
+    metrics = cuda_peak_memory(device)
+    assert tensor.is_cuda
+    assert metrics["peak_cuda_memory_allocated_bytes"] >= tensor.numel() * tensor.element_size()
+    assert metrics["peak_cuda_memory_reserved_bytes"] >= metrics["peak_cuda_memory_allocated_bytes"]
+    assert metrics["peak_cuda_memory_allocated_mib"] is not None
+    assert metrics["peak_cuda_memory_reserved_mib"] is not None
+
+
+def test_comparator_preserves_existing_outputs_and_reports_new_memory_fields():
+    source = Path("scripts/compare_unet_pinn_ab.py").read_text(encoding="utf-8")
+    assert "peak_cuda_memory_allocated_mib" in source
+    assert "peak_cuda_memory_reserved_mib" in source
+    assert 'parser.add_argument("--supervised-dir"' in source
+    assert 'parser.add_argument("--physics-dir"' in source

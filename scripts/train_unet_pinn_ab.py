@@ -21,8 +21,8 @@ from src.ml_device import loader_device_kwargs, resolve_device
 from src.ml_models import build_model
 from src.unet_pinn import PinnFlowDataset, unet_pinn_losses
 from src.unet_pinn_ab import (AB_EXPERIMENTS, configure_determinism,
-    dataset_artifact_sha256, environment_metadata, membership_sha256, seed_worker,
-    state_dict_sha256, write_json)
+    cuda_peak_memory, dataset_artifact_sha256, environment_metadata, membership_sha256,
+    seed_worker, state_dict_sha256, validate_finite_gradients, write_json)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -69,6 +69,7 @@ def run_loader(model, loader, dataset, device, weights, optimizer=None):
     training = optimizer is not None
     model.train(training)
     totals: dict[str, float] = {}
+    gradient_batches_checked = 0
     norm = (dataset.p_mean, dataset.p_std, dataset.ux_mean, dataset.ux_std,
             dataset.uy_mean, dataset.uy_std)
     calculate_physics = (not training or weights["continuity_weight"] != 0.0
@@ -87,10 +88,16 @@ def run_loader(model, loader, dataset, device, weights, optimizer=None):
             if training:
                 optimizer.zero_grad(set_to_none=True)
                 losses["loss_total"].backward()
+                validate_finite_gradients(model)
+                gradient_batches_checked += 1
                 optimizer.step()
             for key, value in losses.items():
                 totals[key] = totals.get(key, 0.0) + float(value.detach())
-    return {key: value / len(loader) for key, value in totals.items()}
+    metrics = {key: value / len(loader) for key, value in totals.items()}
+    if training:
+        metrics["gradient_batches_checked"] = gradient_batches_checked
+        metrics["finite_gradients"] = True
+    return metrics
 
 
 def main(argv=None):
@@ -115,7 +122,12 @@ def main(argv=None):
     if args.pilot:
         output = output / "pilot"
     if output.exists():
-        raise FileExistsError(f"Refusing to overwrite experiment output: {output}")
+        existing = list(output.iterdir())
+        full_run_with_only_preserved_pilot = not args.pilot and all(
+            item.name == "pilot" and item.is_dir() for item in existing
+        )
+        if not full_run_with_only_preserved_pilot:
+            raise FileExistsError(f"Refusing to overwrite experiment output: {output}")
     metadata = {
         **resolved, "dataset_fingerprint": dataset_artifact_sha256(dataset.files, dataset.root),
         "dataset_membership_fingerprint": split.dataset_fingerprint,
@@ -163,20 +175,32 @@ def main(argv=None):
     for epoch in range(1, int(tc["epochs"]) + 1):
         train_metrics = run_loader(model, train_loader, dataset, device, resolved["loss_weights"], optimizer)
         val_metrics = run_loader(model, val_loader, dataset, device, resolved["loss_weights"])
-        history.append({"epoch": epoch, "train": train_metrics, "validation": val_metrics})
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        history.append({"epoch": epoch, "learning_rate": optimizer.param_groups[0]["lr"],
+                        "elapsed_training_seconds": time.perf_counter() - started,
+                        "train": train_metrics, "validation": val_metrics})
         if val_metrics["supervised_loss"] < best_loss:
             best_loss = val_metrics["supervised_loss"]
             best_epoch = epoch
             best_state = copy.deepcopy(model.state_dict())
         print(f"epoch={epoch} validation_supervised_loss={val_metrics['supervised_loss']:.8e}")
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
     duration = time.perf_counter() - started
     if best_state is None:
         raise RuntimeError("No checkpoint was selected")
     model.load_state_dict(best_state)
     validation_metrics = run_loader(model, val_loader, dataset, device, resolved["loss_weights"])
     test_metrics = run_loader(model, test_loader, dataset, device, resolved["loss_weights"])
+    memory = cuda_peak_memory(device)
     metadata.update({"best_validation_epoch": best_epoch, "training_duration_seconds": duration,
-                     "peak_cuda_memory_bytes": torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None})
+                     "configured_batch_size": int(tc["batch_size"]),
+                     "finite_gradient_validation": True,
+                     "gradient_batches_checked": sum(item["train"]["gradient_batches_checked"] for item in history),
+                     **memory,
+                     # Backward-compatible name retained for existing pilot/report consumers.
+                     "peak_cuda_memory_bytes": memory["peak_cuda_memory_allocated_bytes"]})
     output.mkdir(parents=True)
     write_json(output / "resolved_config.json", resolved)
     write_json(output / "experiment_metadata.json", metadata)

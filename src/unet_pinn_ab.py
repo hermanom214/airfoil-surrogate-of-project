@@ -63,13 +63,50 @@ def dataset_artifact_sha256(files: Sequence[Path], root: Path) -> str:
 
 
 def environment_metadata(device: torch.device) -> dict[str, Any]:
+    total_vram = None
+    if device.type == "cuda":
+        total_vram = int(torch.cuda.get_device_properties(device).total_memory)
     return {
         "python_version": platform.python_version(),
         "pytorch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
         "gpu_model": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
+        "gpu_total_memory_bytes": total_vram,
+        "gpu_total_memory_mib": total_vram / (1024**2) if total_vram is not None else None,
         "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
         "cudnn_benchmark": torch.backends.cudnn.benchmark,
+    }
+
+
+def validate_finite_gradients(model: torch.nn.Module) -> int:
+    """Fail before optimizer.step if any existing parameter gradient is NaN or Inf."""
+    checked = 0
+    for name, parameter in model.named_parameters():
+        if parameter.grad is None:
+            continue
+        checked += 1
+        if not torch.isfinite(parameter.grad).all():
+            raise RuntimeError(f"Non-finite gradient detected for parameter: {name}")
+    return checked
+
+
+def cuda_peak_memory(device: torch.device) -> dict[str, int | float | None]:
+    """Return synchronized CUDA peaks, or explicit unavailable values on CPU."""
+    if device.type != "cuda":
+        return {
+            "peak_cuda_memory_allocated_bytes": None,
+            "peak_cuda_memory_allocated_mib": None,
+            "peak_cuda_memory_reserved_bytes": None,
+            "peak_cuda_memory_reserved_mib": None,
+        }
+    torch.cuda.synchronize(device)
+    allocated = int(torch.cuda.max_memory_allocated(device))
+    reserved = int(torch.cuda.max_memory_reserved(device))
+    return {
+        "peak_cuda_memory_allocated_bytes": allocated,
+        "peak_cuda_memory_allocated_mib": allocated / (1024**2),
+        "peak_cuda_memory_reserved_bytes": reserved,
+        "peak_cuda_memory_reserved_mib": reserved / (1024**2),
     }
 
 

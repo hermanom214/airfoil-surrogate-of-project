@@ -38,7 +38,10 @@ def main(argv=None):
         right_history = load(args.physics_dir, "training_history.json")["epochs"]
         report["convergence"] = {"supervised": left_history, "physics_informed": right_history}
         report["training"] = {label: {key: meta.get(key) for key in (
-            "best_validation_epoch", "training_duration_seconds", "peak_cuda_memory_bytes")}
+            "best_validation_epoch", "training_duration_seconds", "configured_batch_size",
+            "finite_gradient_validation", "gradient_batches_checked",
+            "peak_cuda_memory_allocated_bytes", "peak_cuda_memory_allocated_mib",
+            "peak_cuda_memory_reserved_bytes", "peak_cuda_memory_reserved_mib")}
             for label, meta in (("supervised", left_meta), ("physics_informed", right_meta))}
     rendered = json.dumps(report, indent=2, sort_keys=True)
     print(rendered)
