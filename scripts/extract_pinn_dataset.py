@@ -27,7 +27,10 @@ from src.pinn_dataset import (  # noqa: E402
     summary_for_arrays,
     validate_arrays,
 )
-from src.ml_quality_filter import load_inspection_membership  # noqa: E402
+from src.ml_quality_filter import (  # noqa: E402
+    load_inspection_membership,
+    validate_inspection_coverage,
+)
 
 
 SOURCE_ROOT = PROJECT_ROOT / "data" / "flow_fields"
@@ -104,14 +107,8 @@ def discover_archived_case_ids(source_root: Path = SOURCE_ROOT) -> list[str]:
 def inspection_candidates(source_root: Path = SOURCE_ROOT):
     archived_ids = discover_archived_case_ids(source_root)
     membership = load_inspection_membership(source_root)
-    archived = set(archived_ids)
-    inspected = set(membership.case_statuses)
-    if archived != inspected:
-        raise RuntimeError(
-            "Inspection membership does not exactly cover archived CFD cases; "
-            f"missing inspection records={sorted(archived - inspected)}, "
-            f"unknown inspection records={sorted(inspected - archived)}"
-        )
+    validate_inspection_coverage(membership, archived_ids, "archived CFD cases")
+
     return archived_ids, membership
 
 
@@ -276,6 +273,9 @@ def main() -> None:
         raise ValueError("PINN dataset output must not target the existing U-Net flow_fields directory")
     if args.workers <= 0:
         raise ValueError("--workers must be positive")
+    # Validate authoritative membership before a clean rebuild removes the last
+    # generated dataset. Extraction candidates are independent of U-Net splits.
+    archived_ids, membership = inspection_candidates(SOURCE_ROOT)
     if args.clean_rebuild:
         if args.resume or args.validate_only or args.case_id:
             raise ValueError("--clean-rebuild cannot be combined with --resume, --validate-only, or --case-id")
@@ -284,7 +284,6 @@ def main() -> None:
         raise FileExistsError(f"Refusing to reuse existing output directory without --resume: {output_root}")
     if not args.validate_only:
         output_root.mkdir(parents=True, exist_ok=args.resume)
-    archived_ids, membership = inspection_candidates(SOURCE_ROOT)
     case_ids = args.case_id or membership.ok_case_ids
     unknown_or_excluded = sorted(set(case_ids) - set(membership.ok_case_ids))
     if unknown_or_excluded:

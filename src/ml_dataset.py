@@ -14,7 +14,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from src.ml_quality_filter import load_excluded_cases
+from src.ml_quality_filter import load_inspection_membership, validate_inspection_coverage
 from src.evaluate_io import evaluate_parse_params_json
 from src.ml_supervised import (
     NONDIMENSIONAL_TARGETS,
@@ -59,7 +59,10 @@ class AirfoilFlowDataset(Dataset):
     ):
         # Collect and sort all flow-field files in the given directory
         all_files = sorted(data_dir.glob("*/*.npz"))
-        excluded_cases = load_excluded_cases(data_dir)
+        membership = load_inspection_membership(data_dir)
+        artifact_case_ids = {path.parent.name for path in all_files}
+        validate_inspection_coverage(membership, artifact_case_ids, "flow-field artifacts")
+        excluded_cases = membership.exclusion_reasons
         self.files: list[Path] = []
         self.sample_params: list[tuple[float, float]] = []
         self.aoa_mean = 0.0

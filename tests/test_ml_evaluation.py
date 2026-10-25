@@ -5,6 +5,7 @@ import csv
 import numpy as np
 import pandas as pd
 import torch
+import pytest
 import matplotlib
 
 matplotlib.use("Agg")
@@ -151,3 +152,20 @@ def test_dataset_returns_float32_tensors(tmp_path) -> None:
     assert inp.dtype == torch.float32
     assert target.dtype == torch.float32
     assert mask.dtype == torch.float32
+
+
+def test_flow_dataset_rejects_artifact_without_inspection_record(tmp_path) -> None:
+    case_dir = tmp_path / "case_0001_naca0012_aoa0p0_u15p0"
+    case_dir.mkdir()
+    np.savez(case_dir / "case_0001_naca0012_aoa0p0_u15p0_flow.npz", unused=np.ones(1))
+    inspection_path = tmp_path.parent / "pictures_inspect_flow" / "inspect_plausibility.csv"
+    inspection_path.parent.mkdir(exist_ok=True)
+    with inspection_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=["case_name", "overall_status", "overall_reason"]
+        )
+        writer.writeheader()
+        writer.writerow({"case_name": "case_other", "overall_status": "OK", "overall_reason": ""})
+
+    with pytest.raises(RuntimeError, match="missing inspection records"):
+        AirfoilFlowDataset(tmp_path)

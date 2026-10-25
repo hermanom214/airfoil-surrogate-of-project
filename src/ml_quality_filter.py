@@ -5,6 +5,7 @@ import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 
 INSPECTION_CSV_NAME = "inspect_plausibility.csv"
@@ -71,7 +72,7 @@ def load_inspection_membership(data_dir: Path) -> InspectionMembership:
                 statuses[case_name] = status
                 if status == "nOK":
                     excluded[case_name] = (row.get("overall_reason") or "").strip()
-    except (OSError, csv.Error) as exc:
+    except (OSError, UnicodeError, csv.Error) as exc:
         raise RuntimeError(f"Cannot read inspection CSV {csv_path}: {exc}") from exc
 
     if not statuses:
@@ -95,3 +96,17 @@ def load_inspection_membership(data_dir: Path) -> InspectionMembership:
 
 def load_excluded_cases(data_dir: Path) -> dict[str, str]:
     return load_inspection_membership(data_dir).exclusion_reasons
+
+
+def validate_inspection_coverage(
+    membership: InspectionMembership, discovered_case_ids: Iterable[str], context: str
+) -> None:
+    """Require inspection membership to exactly cover the discovered dataset cases."""
+    discovered = set(discovered_case_ids)
+    inspected = set(membership.case_statuses)
+    if discovered != inspected:
+        raise RuntimeError(
+            f"Inspection membership does not exactly cover {context}; "
+            f"missing inspection records={sorted(discovered - inspected)}, "
+            f"unknown inspection records={sorted(inspected - discovered)}"
+        )

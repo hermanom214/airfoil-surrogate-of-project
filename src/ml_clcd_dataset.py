@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from src.ml_quality_filter import load_excluded_cases
+from src.ml_quality_filter import load_inspection_membership, validate_inspection_coverage
 
 
 _FORCECOEFFS_COL_COUNT = 6
@@ -130,11 +130,14 @@ class AirfoilClCdDataset(Dataset):
         self.feature_std = np.ones(5, dtype=np.float32)
         self.target_mean = np.zeros(2, dtype=np.float32)
         self.target_std = np.ones(2, dtype=np.float32)
-        excluded_cases = load_excluded_cases(cases_root)
+        case_dirs = sorted(path for path in cases_root.glob("case_*") if path.is_dir())
+        membership = load_inspection_membership(cases_root)
+        validate_inspection_coverage(
+            membership, (path.name for path in case_dirs), "Cl/Cd source case directories"
+        )
+        excluded_cases = membership.exclusion_reasons
 
-        for case_dir in sorted(cases_root.glob("case_*")):
-            if not case_dir.is_dir():
-                continue
+        for case_dir in case_dirs:
 
             if case_dir.name in excluded_cases:
                 self.skipped_samples.append(

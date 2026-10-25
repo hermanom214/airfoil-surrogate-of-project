@@ -13,7 +13,7 @@ from src.pinn_dataset import (
     validate_arrays,
 )
 from scripts.extract_pinn_dataset import clean_generated_output, inspection_candidates, verify_final_artifacts
-from src.ml_quality_filter import load_inspection_membership
+from src.ml_quality_filter import load_inspection_membership, validate_inspection_coverage
 from src.pinn_dataset import CaseResult
 
 
@@ -150,3 +150,13 @@ def test_output_guard_targets_separate_directory() -> None:
     output = Path("data/pinn_dataset").resolve()
     assert source != output
     assert source not in output.parents
+
+
+def test_incomplete_inspection_membership_fails(tmp_path: Path) -> None:
+    _write_inspection(
+        tmp_path / "pictures_inspect_flow" / "inspect_plausibility.csv",
+        [("case_a", "OK")],
+    )
+    membership = load_inspection_membership(tmp_path / "flow_fields")
+    with pytest.raises(RuntimeError, match="missing inspection records=.*case_b"):
+        validate_inspection_coverage(membership, ["case_a", "case_b"], "test cases")
