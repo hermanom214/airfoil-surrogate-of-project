@@ -65,7 +65,7 @@ def evaluate_npz_scalar_to_str(value: Any) -> str:
 
 def evaluate_extract_case_meta(npz_data: Any, npz_path: Any, parsed_params: tuple[float, float] | None) -> dict[str, Any]:
     npz_keys = set(npz_data.files) if hasattr(npz_data, "files") else set()
-    params_raw = npz_data["params"] if "params" in npz_keys else None
+    params_raw = npz_data["params"] if "params" in npz_keys else (npz_data["metadata"] if "metadata" in npz_keys else None)
     params = evaluate_parse_params_json(params_raw)
 
     case_id = str(params.get("case_id", "")).strip()
@@ -85,7 +85,9 @@ def evaluate_extract_case_meta(npz_data: Any, npz_path: Any, parsed_params: tupl
     else:
         aoa_deg = 0.0
 
-    if "inlet_velocity" in params:
+    if "U_inf" in params:
+        inlet_velocity = float(params["U_inf"])
+    elif "inlet_velocity" in params:
         inlet_velocity = float(params["inlet_velocity"])
     elif parsed_params is not None:
         inlet_velocity = float(parsed_params[1])
@@ -106,8 +108,8 @@ def evaluate_extract_case_meta(npz_data: Any, npz_path: Any, parsed_params: tupl
 
 
 def evaluate_get_model_kwargs(model_name: str, ml_cfg: Any) -> dict[str, Any]:
-    if model_name == "simple_unet":
-        return asdict(ml_cfg.model.params.simple_unet)
+    if model_name in {"simple_unet", "unet_pinn"}:
+        return asdict(getattr(ml_cfg.model.params, model_name))
     if model_name == "rans_pinn":
         return asdict(ml_cfg.model.params.rans_pinn)
     raise ValueError(f"Unsupported model in config: {model_name}")

@@ -58,12 +58,25 @@ from src.ml_models import build_model
 from src.ml_device import log_device, resolve_device
 from src.ml_protocols import PhysicsLossModel
 from src.ml_training import compute_grid_spacing_from_xy, masked_mse
+from src.unet_pinn import PinnFlowDataset, unet_pinn_losses
+
+
+def resolve_evaluation_checkpoint(paths, ml_cfg, model_name, experiment_name=None):
+    """Resolve the selected model without consulting a different global default."""
+    subdir=experiment_name or (ml_cfg.experiment_for(model_name).output_name if model_name == "unet_pinn" else None) or model_name
+    filename=ml_cfg.output.filename_template.format(model_name=model_name)
+    path=paths.project_root/ml_cfg.output.models_subdir/subdir/filename
+    legacy=paths.project_root/ml_cfg.output.models_subdir/filename
+    if experiment_name is None and not path.exists() and legacy.exists(): path=legacy
+    if not path.is_file(): raise FileNotFoundError(f"Model weights not found: {path}")
+    return path,subdir
 
 
 @torch.no_grad()
 def run_validation(
     device_requested: str | None = None,
     experiment_name: str | None = None,
+    model_requested: str | None = None,
 ) -> None:
     config_path = PROJECT_ROOT / "configs" / "paths.yaml"
     ml_config_path = PROJECT_ROOT / "configs" / "ml_models_config.yaml"
@@ -72,13 +85,12 @@ def run_validation(
     ml_cfg = load_ml_models_config(ml_config_path)
 
     data_dir = paths.flow_fields_output
-    model_name = ml_cfg.model.name
-    model_filename = ml_cfg.output.filename_template.format(model_name=model_name)
-    checkpoint_subdir = experiment_name or model_name
-    model_path = paths.project_root / ml_cfg.output.models_subdir / checkpoint_subdir / model_filename
-    legacy_model_path = paths.project_root / ml_cfg.output.models_subdir / model_filename
-    if not model_path.exists() and legacy_model_path.exists():
-        model_path = legacy_model_path
+    model_name = model_requested or ml_cfg.model.name
+    if model_name == "clcd_mlp":
+        raise ValueError("Use scripts.evaluate_clcd_model for clcd_mlp")
+    if model_name == "unet_pinn":
+        data_dir = paths.project_root / "data" / "pinn_dataset"
+    model_path,checkpoint_subdir=resolve_evaluation_checkpoint(paths,ml_cfg,model_name,experiment_name)
 
     validation_root = paths.project_root / ml_cfg.output.models_subdir / f"{checkpoint_subdir}_validation"
     metrics_dir = validation_root / "metrics"
@@ -94,7 +106,7 @@ def run_validation(
     if not model_path.exists():
         raise FileNotFoundError(f"Model weights not found: {model_path}")
 
-    dataset = AirfoilFlowDataset(data_dir)
+    dataset = PinnFlowDataset(data_dir) if model_name == "unet_pinn" else AirfoilFlowDataset(data_dir)
     if len(dataset) == 0:
         raise RuntimeError(f"Dataset is empty in: {data_dir}")
 
@@ -103,6 +115,8 @@ def run_validation(
     except TypeError:
         loaded = torch.load(model_path, map_location="cpu")
     checkpoint = loaded if isinstance(loaded, dict) and "model_state_dict" in loaded else None
+    if checkpoint and checkpoint.get("model_name", model_name) != model_name:
+        raise ValueError(f"Requested model {model_name} disagrees with checkpoint model {checkpoint['model_name']}")
     dataset.supervised_config = supervised_config_from_checkpoint(checkpoint)
     target_representation = dataset.supervised_config.target_representation
     raw_metric_stats: dict[str, float]
@@ -161,7 +175,7 @@ def run_validation(
     model.load_state_dict(state_dict["model_state_dict"] if checkpoint else state_dict)
 
     model.eval()
-    physics_available = model_name == "rans_pinn" and hasattr(model, "rans_residual_loss")
+    physics_available = model_name == "unet_pinn" or (model_name == "rans_pinn" and hasattr(model, "rans_residual_loss"))
 
     if model_name == "rans_pinn":
         print(
@@ -185,7 +199,11 @@ def run_validation(
             original_idx = val_indices[local_idx]
             npz_path = dataset.files[original_idx]
 
-            inp, target_norm, _ = dataset[original_idx]
+            sample = dataset[original_idx]
+            if model_name == "unet_pinn":
+                inp, target_norm = sample["input"], sample["target"]
+            else:
+                inp, target_norm, _ = sample
             inp_batch = inp.unsqueeze(0).to(device)
             pred_norm = model(inp_batch)[0].cpu()
 
@@ -263,7 +281,14 @@ def run_validation(
             speed_pred = np.sqrt(ux_pred ** 2 + uy_pred ** 2)
             velocity_vector_error = np.sqrt((ux_pred - ux_true) ** 2 + (uy_pred - uy_true) ** 2)
 
-            if physics_available:
+            if model_name == "unet_pinn":
+                phys = unet_pinn_losses(pred_batch,target_batch,sample["fluid_mask"][None],sample["physics_mask"][None],
+                    sample["xy"][None],sample["k"][None],sample["nut"][None],sample["nu"][None],sample["u_ref"][None],sample["l_ref"][None],
+                    (dataset.p_mean,dataset.p_std,dataset.ux_mean,dataset.ux_std,dataset.uy_mean,dataset.uy_std))
+                continuity_loss=float(phys["loss_continuity"])
+                momentum_x_loss=float(phys["loss_momentum_x"]); momentum_y_loss=float(phys["loss_momentum_y"])
+                physics_loss=continuity_loss+momentum_x_loss+momentum_y_loss
+            elif physics_available:
                 physics_model = cast(PhysicsLossModel, model)
                 phys = physics_model.rans_residual_loss(
                     pred=pred_batch.to(device),
@@ -700,12 +725,13 @@ def run_validation(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate a trained flow-field model.")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default=None)
+    parser.add_argument("--model", choices=("simple_unet", "unet_pinn", "rans_pinn"), default=None)
     parser.add_argument(
         "--experiment-name", default=None,
         help="Checkpoint/output subdirectory; defaults to the model name for legacy baselines.",
     )
     args = parser.parse_args()
-    run_validation(args.device, args.experiment_name)
+    run_validation(args.device, args.experiment_name, args.model)
 
 
 if __name__ == "__main__":

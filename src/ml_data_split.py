@@ -125,6 +125,8 @@ def load_or_create_fixed_test_split(
 ) -> DevelopmentTestSplit:
     """Persist a test split by case ID; fold/search settings never affect it."""
     current = [str(v) for v in case_ids]
+    if len(set(current)) != len(current):
+        raise RuntimeError("Dataset case IDs must be unique")
     if metadata_path.exists() and regenerate_on_dataset_change:
         warnings.warn(
             f"Explicit regeneration requested; replacing fixed test split at {metadata_path}.",
@@ -140,6 +142,12 @@ def load_or_create_fixed_test_split(
             id_to_idx = {case_id: i for i, case_id in enumerate(current)}
             test_ids = [str(v) for v in raw["test_case_ids"]]
             dev_ids = [str(v) for v in raw["development_case_ids"]]
+            if (len(set(dev_ids)) != len(dev_ids)
+                    or len(set(test_ids)) != len(test_ids)
+                    or set(dev_ids) & set(test_ids)
+                    or set(dev_ids) | set(test_ids) != set(current)
+                    or not dev_ids or not test_ids):
+                raise RuntimeError(f"Invalid persisted split partition at {metadata_path}: duplicate, overlapping, missing or unknown case IDs")
             return DevelopmentTestSplit(
                 [id_to_idx[v] for v in dev_ids], [id_to_idx[v] for v in test_ids],
                 dev_ids, test_ids, current, dataset_fingerprint(current),

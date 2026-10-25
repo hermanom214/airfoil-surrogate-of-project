@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-AVAILABLE_MODELS = ("simple_unet", "rans_pinn", "clcd_mlp")
+AVAILABLE_MODELS = ("simple_unet", "unet_pinn", "mlp_pinn", "rans_pinn", "clcd_mlp")
 
 
 class SimpleUNet(nn.Module):
@@ -344,8 +344,10 @@ def build_model(model_name: str, **kwargs) -> nn.Module:
     """Factory for selecting a model architecture from AVAILABLE_MODELS."""
 
     key = model_name.lower().strip()
-    if key == "simple_unet":
+    if key in {"simple_unet", "unet_pinn"}:
         return SimpleUNet(**kwargs)
+    if key == "mlp_pinn":
+        raise NotImplementedError("mlp_pinn is reserved for Phase B and is not implemented")
     if key == "rans_pinn":
         return PhysicsInformedCNN(**kwargs)
     if key == "clcd_mlp":

@@ -14,6 +14,7 @@ DIFF_PERCENTILE = 99.0
 DIFF_DISPLAY_SCALE = 3
 
 
+
 def evaluate_robust_limits(arr: np.ndarray, low: float, high: float) -> tuple[float, float]:
     vals = arr[np.isfinite(arr)]
     if vals.size == 0:

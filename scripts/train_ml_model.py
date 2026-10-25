@@ -31,6 +31,7 @@ from src.ml_models import AVAILABLE_MODELS, build_model
 from src.ml_device import loader_device_kwargs, log_device, resolve_device
 from src.ml_training import evaluate, run_supervised_epoch, train_one_epoch, train_one_epoch_physics
 from src.ml_supervised import RAW_TARGETS, SupervisedLossConfig
+from src.unet_pinn import PinnFlowDataset, unet_pinn_losses
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -120,6 +121,7 @@ def model_kwargs(model_name: str, hp: Mapping[str, Any]) -> dict[str, Any]:
     allowed = {
         "clcd_mlp": {"input_dim", "hidden_dims", "output_dim", "dropout"},
         "simple_unet": {"in_channels", "out_channels", "encoder_channels", "bottleneck_channels"},
+        "unet_pinn": {"in_channels", "out_channels", "encoder_channels", "bottleneck_channels"},
         "rans_pinn": {"in_channels", "out_channels", "hidden_channels", "depth"},
     }[model_name]
     return {key: hp.get(key, value) for key, value in base.items() if key in allowed}
@@ -205,6 +207,28 @@ def train_field(dataset: AirfoilFlowDataset, model_name: str,
     model = build_model(model_name, **model_kwargs(model_name, hp)).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=float(hp["learning_rate"]),
                                  weight_decay=float(hp.get("weight_decay", 0.0)))
+    if model_name == "unet_pinn":
+        weights = ML_CFG.experiment_for("unet_pinn").pinn_loss_weights
+        norm = (dataset.p_mean,dataset.p_std,dataset.ux_mean,dataset.ux_std,dataset.uy_mean,dataset.uy_std)
+        def run(loader, training: bool) -> dict[str, float]:
+            model.train(training); totals: dict[str,float] = {}
+            for batch in loader:
+                moved={k:(v.to(device,non_blocking=device.type=="cuda") if torch.is_tensor(v) and k!="omega" else v) for k,v in batch.items()}
+                with torch.set_grad_enabled(training):
+                    losses=unet_pinn_losses(model(moved["input"]),moved["target"],moved["fluid_mask"],moved["physics_mask"],
+                        moved["xy"],moved["k"],moved["nut"],moved["nu"],moved["u_ref"],moved["l_ref"],norm,
+                        weights["supervised_weight"],weights["continuity_weight"],weights["momentum_weight"])
+                    if not torch.isfinite(losses["loss_total"]): raise RuntimeError("Non-finite unet_pinn loss")
+                    if training:
+                        optimizer.zero_grad(); losses["loss_total"].backward(); optimizer.step()
+                for key,value in losses.items(): totals[key]=totals.get(key,0.0)+float(value.detach())
+            if not totals: raise RuntimeError("unet_pinn loader has zero batches")
+            return {key:value/len(loader) for key,value in totals.items()}
+        for epoch in range(epochs):
+            diagnostics=run(train_loader,True)
+            print(f"[TRAIN] epoch={epoch+1}/{epochs} "+" ".join(f"{k}={v:.6e}" for k,v in diagnostics.items()))
+        metrics=run(eval_loader,False)
+        return model,{"objective":metrics["loss_supervised"],**metrics}
     for epoch in range(epochs):
         if model_name == "rans_pinn":
             warmup = int(hp.get("physics_loss.warmup_epochs", ML_CFG.physics_loss.warmup_epochs))
@@ -268,6 +292,12 @@ def main() -> None:
             force_coeffs_relpath=cfg.force_coeffs_relpath,
         )
         dx = dy = 0.0
+    elif model_name == "unet_pinn":
+        if experiment.dataset != "pinn_dataset":
+            raise RuntimeError("unet_pinn must explicitly configure dataset: pinn_dataset")
+        dataset = PinnFlowDataset(PATHS.project_root / "data" / "pinn_dataset")
+        with np.load(dataset.files[0], allow_pickle=False) as raw: xy=raw["xy"]
+        dx=float(np.median(np.diff(xy[0,:,0]))); dy=float(np.median(np.diff(xy[:,0,1])))
     else:
         supervised_config = (
             experiment.supervised_loss if model_name == "simple_unet" else SupervisedLossConfig()
@@ -309,9 +339,10 @@ def main() -> None:
     if args.regenerate_split and split_existed:
         print(f"[WARN] Fixed test split was explicitly regenerated: {fixed_split_path}")
     split_sha256 = hashlib.sha256(fixed_split_path.read_bytes()).hexdigest()
-    if len(split.development_indices) != 465 or len(split.test_indices) != 116:
+    expected_counts = (446,112) if model_name == "unet_pinn" else (465,116)
+    if len(split.development_indices) != expected_counts[0] or len(split.test_indices) != expected_counts[1]:
         raise RuntimeError(
-            "Fixed split count mismatch: expected development/test=465/116, got "
+            f"Fixed split count mismatch: expected development/test={expected_counts[0]}/{expected_counts[1]}, got "
             f"{len(split.development_indices)}/{len(split.test_indices)}"
         )
     checkpoint_path = output_dir / ML_CFG.output.filename_template.format(model_name=model_name)
@@ -385,6 +416,9 @@ def main() -> None:
     else:
         cv_results, best = run_cross_validation(configurations, folds, run_fold)
     best_hp = best["hyperparameters"]
+    if model_name == "unet_pinn":
+        best["selection_metric"] = "loss_supervised"
+        best["selection_policy"] = "development validation only; fixed test excluded; final weights after configured epochs"
     final_seed = split_cfg.seed + 10000
     print(
         f"[INFO] Final normalization fitted from all {len(split.development_indices)} "
@@ -402,6 +436,8 @@ def main() -> None:
             experiment.supervised_loss if model_name == "simple_unet" else None,
         )
     checkpoint = {
+        "selection_metric": "loss_supervised" if model_name == "unet_pinn" else "objective",
+        "selection_policy": "configuration selected on development validation; final weights after configured epochs; fixed test reporting only",
         "model_name": model_name,
         "model_state_dict": final_model.state_dict(),
         "model_config": model_kwargs(model_name, best_hp),

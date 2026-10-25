@@ -128,6 +128,7 @@ class ClCdMlpModelParamsConfig:
 @dataclass
 class MLModelParamsConfig:
     simple_unet: SimpleUNetModelParamsConfig
+    unet_pinn: SimpleUNetModelParamsConfig
     rans_pinn: RansPinnModelParamsConfig
     clcd_mlp: ClCdMlpModelParamsConfig
 
@@ -172,6 +173,8 @@ class MLExperimentConfig:
     hyperparameter_search: MLHyperparameterSearchConfig
     output_name: str | None = None
     supervised_loss: SupervisedLossConfig = field(default_factory=SupervisedLossConfig)
+    dataset: str | None = None
+    pinn_loss_weights: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -345,6 +348,12 @@ def load_ml_models_config(config_path: Path) -> MLModelsConfig:
                 ],
                 bottleneck_channels=int(model_data["params"]["simple_unet"]["bottleneck_channels"]),
             ),
+            unet_pinn=SimpleUNetModelParamsConfig(
+                in_channels=int(model_data["params"]["unet_pinn"]["in_channels"]),
+                out_channels=int(model_data["params"]["unet_pinn"]["out_channels"]),
+                encoder_channels=[int(v) for v in model_data["params"]["unet_pinn"]["encoder_channels"]],
+                bottleneck_channels=int(model_data["params"]["unet_pinn"]["bottleneck_channels"]),
+            ),
             rans_pinn=RansPinnModelParamsConfig(
                 in_channels=int(model_data["params"]["rans_pinn"]["in_channels"]),
                 out_channels=int(model_data["params"]["rans_pinn"]["out_channels"]),
@@ -423,6 +432,10 @@ def load_ml_models_config(config_path: Path) -> MLModelsConfig:
             data_split=parse_split(overrides.get("data_split", {})),
             hyperparameter_search=parse_search(overrides.get("hyperparameter_search", {})),
             output_name=(None if overrides.get("output_name") is None else str(overrides["output_name"])),
+            dataset=(None if overrides.get("dataset") is None else str(overrides["dataset"])),
+            pinn_loss_weights={key: float(loss[key]) for key in (
+                "supervised_weight", "continuity_weight", "momentum_weight"
+            ) if key in loss},
             supervised_loss=SupervisedLossConfig(
                 target_representation=str(overrides.get("target_representation", "raw")),
                 wall_weight=float(loss.get("wall_weight", 0.0)),
