@@ -82,6 +82,7 @@ def test_checkpoint_output_collision_guard_is_explicit_in_runner_source():
     assert "if output.exists()" in source
     assert "full_run_with_only_preserved_pilot" in source
     assert "Refusing to overwrite experiment output" in source
+    assert "output.mkdir(parents=True, exist_ok=True)" in source
 
 
 def test_finite_gradients_allow_step_and_grad_none_is_ignored():

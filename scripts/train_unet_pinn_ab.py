@@ -201,7 +201,9 @@ def main(argv=None):
                      **memory,
                      # Backward-compatible name retained for existing pilot/report consumers.
                      "peak_cuda_memory_bytes": memory["peak_cuda_memory_allocated_bytes"]})
-    output.mkdir(parents=True)
+    # The collision guard above permits an existing parent only when it contains
+    # the preserved pilot directory and no full-run artifacts.
+    output.mkdir(parents=True, exist_ok=True)
     write_json(output / "resolved_config.json", resolved)
     write_json(output / "experiment_metadata.json", metadata)
     write_json(output / "split_membership.json", {k: metadata[k] for k in (
