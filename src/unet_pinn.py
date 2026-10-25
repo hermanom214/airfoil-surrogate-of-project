@@ -96,19 +96,25 @@ def _ms(value,mask,name):
 
 
 def unet_pinn_losses(pred,target,fluid_mask,physics_mask,xy,k,nut,nu,u_ref,l_ref,normalization,
-                     supervised_weight=1.0,continuity_weight=.1,momentum_weight=.1):
+                     supervised_weight=1.0,continuity_weight=.1,momentum_weight=.1,
+                     compute_physics=True):
     """Loss using the installed OpenFOAM modified-pressure formulation."""
     means=pred.new_tensor(normalization[::2]).view(1,3,1,1); stds=pred.new_tensor(normalization[1::2]).view(1,3,1,1)
     physical=pred*stds+means; p,u,v=physical[:,0:1],physical[:,1:2],physical[:,2:3]
     sq=(pred-target).square(); den=fluid_mask.sum()
     if int(den.detach())==0: raise RuntimeError("supervised loss has no valid fluid cells")
     lp,lux,luy=[(sq[:,i:i+1]*fluid_mask).sum()/den for i in range(3)]; lsup=(lp+lux+luy)/3
-    mask=evaluation_mask(physics_mask)
-    rc,rx,ry=rans_residuals(physical,xy,nut,nu)
-    ls=l_ref.view(-1,1,1,1); us=u_ref.view(-1,1,1,1)
-    if torch.any(us<=0) or torch.any(ls<=0): raise ValueError("reference scales must be positive")
-    lc=_ms(rc*ls/us,mask,"continuity"); lmx=_ms(rx*ls/us.square(),mask,"momentum-x"); lmy=_ms(ry*ls/us.square(),mask,"momentum-y"); lm=lmx+lmy
+    if compute_physics:
+        mask=evaluation_mask(physics_mask)
+        rc,rx,ry=rans_residuals(physical,xy,nut,nu)
+        ls=l_ref.view(-1,1,1,1); us=u_ref.view(-1,1,1,1)
+        if torch.any(us<=0) or torch.any(ls<=0): raise ValueError("reference scales must be positive")
+        lc=_ms(rc*ls/us,mask,"continuity"); lmx=_ms(rx*ls/us.square(),mask,"momentum-x"); lmy=_ms(ry*ls/us.square(),mask,"momentum-y"); lm=lmx+lmy
+    else:
+        lc=lmx=lmy=lm=pred.new_zeros(())
     total=supervised_weight*lsup+continuity_weight*lc+momentum_weight*lm
-    return {"loss_total":total,"loss_p":lp,"loss_ux":lux,"loss_uy":luy,"loss_supervised":lsup,"loss_continuity":lc,
+    return {"loss_total":total,"loss_p":lp,"loss_ux":lux,"loss_uy":luy,"loss_supervised":lsup,
+      "supervised_loss":lsup,"raw_continuity_loss":lc,"raw_momentum_x_loss":lmx,
+      "raw_momentum_y_loss":lmy,"raw_momentum_loss":lm,"loss_continuity":lc,
       "loss_momentum_x":lmx,"loss_momentum_y":lmy,"loss_momentum":lm,"weighted_supervised":supervised_weight*lsup,
       "weighted_continuity":continuity_weight*lc,"weighted_momentum":momentum_weight*lm}

@@ -175,6 +175,8 @@ class MLExperimentConfig:
     supervised_loss: SupervisedLossConfig = field(default_factory=SupervisedLossConfig)
     dataset: str | None = None
     pinn_loss_weights: dict[str, float] = field(default_factory=dict)
+    training_overrides: dict[str, Any] = field(default_factory=dict)
+    selection_metric: str = "objective"
 
 
 @dataclass
@@ -436,6 +438,8 @@ def load_ml_models_config(config_path: Path) -> MLModelsConfig:
             pinn_loss_weights={key: float(loss[key]) for key in (
                 "supervised_weight", "continuity_weight", "momentum_weight"
             ) if key in loss},
+            training_overrides=dict(overrides.get("training", {}) or {}),
+            selection_metric=str(overrides.get("selection_metric", "objective")),
             supervised_loss=SupervisedLossConfig(
                 target_representation=str(overrides.get("target_representation", "raw")),
                 wall_weight=float(loss.get("wall_weight", 0.0)),
