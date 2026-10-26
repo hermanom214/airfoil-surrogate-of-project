@@ -95,6 +95,66 @@ experiments:
     selection_metric: supervised_loss
     data_split: {cv_enabled: false, n_folds: 5}
     hyperparameter_search: {strategy: none}
+  unet_improved_supervised:
+    output_name: unet_improved_supervised
+    dataset: pinn_dataset
+    target_representation: nondimensional_perturbation
+    training:
+      batch_size: 2
+      epochs: 30
+      learning_rate: 0.001
+      weight_decay: 0.0
+      optimizer: adam
+      scheduler: none
+      seed: 42
+      dataloader_seed: 42
+      pilot_epochs: 1
+    loss:
+      supervised_weight: 1.0
+      continuity_weight: 0.0
+      momentum_weight: 0.0
+      wall_weight: 3.0
+      wake_weight: 3.0
+      wall_distance_fraction: 0.05
+      wake_x_start: 0.9
+      wake_x_end: 1.75
+      wake_half_height: 0.20
+      gradient_loss_weight: 0.1
+      gradient_channel_weights: [1.0, 1.0, 1.0]
+      p_inf: 0.0
+    selection_metric: improved_supervised_loss
+    data_split: {cv_enabled: false, n_folds: 5}
+    hyperparameter_search: {strategy: none}
+  unet_improved_pinn:
+    output_name: unet_improved_pinn
+    dataset: pinn_dataset
+    target_representation: nondimensional_perturbation
+    training:
+      batch_size: 2
+      epochs: 30
+      learning_rate: 0.001
+      weight_decay: 0.0
+      optimizer: adam
+      scheduler: none
+      seed: 42
+      dataloader_seed: 42
+      pilot_epochs: 1
+    loss:
+      supervised_weight: 1.0
+      continuity_weight: 0.1
+      momentum_weight: 0.1
+      wall_weight: 3.0
+      wake_weight: 3.0
+      wall_distance_fraction: 0.05
+      wake_x_start: 0.9
+      wake_x_end: 1.75
+      wake_half_height: 0.20
+      gradient_loss_weight: 0.1
+      gradient_channel_weights: [1.0, 1.0, 1.0]
+      p_inf: 0.0
+    selection_metric: improved_supervised_loss
+    data_split: {cv_enabled: false, n_folds: 5}
+    hyperparameter_search: {strategy: none}
   clcd_mlp:
     data_split: {cv_enabled: false, n_folds: 5}
     hyperparameter_search:
