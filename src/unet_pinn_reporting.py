@@ -141,15 +141,22 @@ def pooled_mse(batch_mses, counts):
     return math.fsum(m*c for m,c in zip(batch_mses, counts)) / sum(counts)
 
 
-def plot_histories(histories, best_epochs, output):
+def plot_histories(histories, best_epochs, output, improved=False):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     output = Path(output)
-    specs = [("supervised_loss", "Supervised validation loss", False),
+    specs = [("supervised_loss", "Supervised validation loss", False)]
+    if improved:
+        specs += [
+            ("supervised_weighted_data_loss", "Region-weighted data loss", False),
+            ("supervised_gradient_loss", "Gradient-matching loss", False),
+        ]
+    specs += [
         ("raw_continuity_loss", "Continuity", True),
         ("raw_momentum_x_loss", "Momentum-x", True),
-        ("raw_momentum_y_loss", "Momentum-y", True)]
+        ("raw_momentum_y_loss", "Momentum-y", True),
+    ]
     paths = []
     for key, title, rms in specs:
         fig, ax = plt.subplots(figsize=(8, 4.8), layout="constrained")
