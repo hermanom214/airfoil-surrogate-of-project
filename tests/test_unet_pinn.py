@@ -96,7 +96,8 @@ def test_mixed_derivatives_and_three_dimensional_trace():
     physical=torch.cat((0*x,x*y,x*y),1)
     rc,rx,ry=rans_residuals(physical,xy,torch.zeros_like(nut),torch.tensor([.3]))
     valid=evaluation_mask(mask).bool()
-    conv=x*y*(x+y)
+    # Fluxes u^2=x^2*y^2 and uv=x^2*y^2 give 2*x*y*(x+y).
+    conv=2*x*y*(x+y)
     assert torch.allclose(rc[valid],(x+y)[valid],atol=1e-6)
     # div(grad U + grad U^T - 2/3 I div U) = (1/3,1/3).
     assert torch.allclose(rx[valid],(conv-.1)[valid],atol=2e-6)
@@ -105,7 +106,8 @@ def test_mixed_derivatives_and_three_dimensional_trace():
 
 def test_scaling_and_pressure_sign():
     xy,mask,k,nut=fields(); x,y=xy[...,0][:,None],xy[...,1][:,None]
-    physical=torch.cat((-x*x/2,x,0*y),1)
+    # div(U tensor U)_x = d(x^2)/dx = 2x; p=-x^2 cancels it.
+    physical=torch.cat((-x*x,x,0*y),1)
     rc,rx,ry=rans_residuals(physical,xy,0*nut,torch.tensor([0.]))
     valid=evaluation_mask(mask).bool()
     assert torch.max(rx[valid].abs())<1e-6
@@ -118,6 +120,88 @@ def test_scaling_and_pressure_sign():
         torch.tensor([2.]),torch.tensor([3.]),(0.,1.,0.,1.,0.,1.))
     assert losses["loss_momentum_x"] == pytest.approx(2.25)
     assert losses["loss_momentum_y"] == pytest.approx(5.0625,rel=1e-5)
+
+
+@pytest.mark.parametrize("divergence_free", [False, True])
+def test_conservative_convection_analytical_flux_derivatives(divergence_free):
+    xy, mask, _, nut = fields()
+    x, y = xy[..., 0][:, None], xy[..., 1][:, None]
+    # u=2x+1, v=b*y-3. Direct flux derivatives:
+    # Rx=d(u^2)/dx+d(uv)/dy=(4+b)u;
+    # Ry=d(uv)/dx+d(v^2)/dy=(2+2b)v.
+    b = -2. if divergence_free else 3.
+    u, v = 2*x+1, b*y-3
+    rc, rx, ry = rans_residuals(torch.cat((0*x, u, v), 1), xy, 0*nut, torch.tensor([0.]))
+    valid = evaluation_mask(mask).bool()
+    torch.testing.assert_close(rc[valid], torch.full_like(rc[valid], 2+b), atol=3e-6, rtol=1e-6)
+    torch.testing.assert_close(rx[valid], ((4+b)*u)[valid], atol=1e-5, rtol=1e-6)
+    torch.testing.assert_close(ry[valid], ((2+2*b)*v)[valid], atol=2e-5, rtol=1e-6)
+    if divergence_free:
+        torch.testing.assert_close(rx[valid], (2*u)[valid], atol=1e-5, rtol=1e-6)
+        torch.testing.assert_close(ry[valid], (-2*v)[valid], atol=2e-5, rtol=1e-6)
+
+
+@pytest.mark.parametrize("representation", ["raw", "nondimensional_perturbation"])
+@pytest.mark.parametrize("speed", [7., 23.])
+def test_checkpoint_evaluation_reconstruction_and_training_physics(representation, speed, monkeypatch):
+    from types import SimpleNamespace
+    import src.unet_pinn as pinn
+    from src.ml_supervised import (SupervisedLossConfig, physical_to_targets,
+        targets_to_physical, supervised_config_from_checkpoint)
+    from scripts.evaluate_ml_model import evaluate_pinn_physics
+    xy, mask, k, nut = fields()
+    x, y = xy[..., 0][0].numpy(), xy[..., 1][0].numpy()
+    # Distinct, spatially varying channels make channel/scaling errors observable.
+    p, u, v = 11+2*x+3*y, speed+4*x-y, -2+5*y+x
+    cfg = SupervisedLossConfig(target_representation=representation, p_inf=9.)
+    checkpoint = {"supervised_loss_config": cfg.metadata()}
+    decoded_cfg = supervised_config_from_checkpoint(checkpoint)
+    native = physical_to_targets(p, u, v, speed, representation, cfg.p_inf)
+    roundtrip = targets_to_physical(native, speed, representation, cfg.p_inf)
+    np.testing.assert_allclose(np.stack(roundtrip), np.stack((p,u,v)), rtol=2e-6, atol=2e-6)
+    norm = (3., 2., 4., 3., 5., 4.) if representation == "raw" else (0.,1.,0.,1.,0.,1.)
+    if representation == "raw":
+        native = (native-np.array(norm[::2])[:,None,None])/np.array(norm[1::2])[:,None,None]
+    pred = torch.tensor(native, dtype=torch.float32)[None].requires_grad_()
+    captured = []
+    original = pinn.rans_residuals
+    def capture(physical, *args):
+        captured.append(physical)
+        return original(physical, *args)
+    monkeypatch.setattr(pinn, "rans_residuals", capture)
+    sample = dict(fluid_mask=mask[0], physics_mask=mask[0], xy=xy[0], k=k[0], nut=nut[0],
+        nu=torch.tensor(1e-5), u_ref=torch.tensor(speed), l_ref=torch.tensor(1.))
+    dataset = SimpleNamespace(supervised_config=decoded_cfg, **dict(zip(
+        ("p_mean","p_std","ux_mean","ux_std","uy_mean","uy_std"), norm)))
+    evaluation = evaluate_pinn_physics(dataset, pred, pred.detach(), sample)
+    training = pinn.unet_pinn_losses(pred, pred.detach(), mask, mask, xy, k, nut,
+        sample["nu"][None], sample["u_ref"][None], sample["l_ref"][None], norm,
+        supervised_config=decoded_cfg)
+    torch.testing.assert_close(captured[0], torch.tensor(np.stack((p,u,v)))[None], rtol=2e-6, atol=2e-6)
+    for key in ("loss_continuity", "loss_momentum_x", "loss_momentum_y"):
+        torch.testing.assert_close(evaluation[key], training[key])
+    evaluation["loss_momentum"].backward()
+    for channel in (1,2):
+        assert torch.isfinite(pred.grad[:,channel]).all()
+        assert pred.grad[:,channel].abs().sum() > 0
+
+
+def test_improved_dataset_common_raw_statistics_do_not_change_targets(tmp_path):
+    import json
+    from src.ml_supervised import SupervisedLossConfig
+    from src.unet_pinn import PinnFlowDataset
+    folder = tmp_path/"cases"/"sample"
+    folder.mkdir(parents=True)
+    p = np.array([[1.,3.],[100.,5.]],dtype=np.float32)
+    fluid = np.array([[1,1],[0,1]],dtype=np.uint8)
+    np.savez(folder/"sample.npz", p=p, U=np.stack((2*p,-p),-1), fluid_mask=fluid,
+        metadata=json.dumps(dict(aoa_deg=2.,U_inf=15.)))
+    dataset = PinnFlowDataset(tmp_path,SupervisedLossConfig(target_representation="nondimensional_perturbation"))
+    stats = dataset.compute_raw_target_normalization([0])
+    assert stats["p_mean"] == 3 and stats["ux_mean"] == 6 and stats["uy_mean"] == -3
+    assert stats["p_std"] == pytest.approx(np.std([1.,3.,5.]))
+    assert dataset.p_mean == dataset.ux_mean == dataset.uy_mean == 0
+    assert dataset.p_std == dataset.ux_std == dataset.uy_std == 1
 
 
 def test_stored_mask_is_not_eroded_twice():

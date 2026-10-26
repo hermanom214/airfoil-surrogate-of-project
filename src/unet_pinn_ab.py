@@ -15,6 +15,8 @@ import torch
 
 
 AB_EXPERIMENTS = ("unet_pinn_supervised", "unet_pinn_physics")
+IMPROVED_AB_EXPERIMENTS = ("unet_improved_supervised", "unet_improved_pinn")
+ALL_AB_EXPERIMENTS = AB_EXPERIMENTS + IMPROVED_AB_EXPERIMENTS
 ALLOWED_DIFFERENCES = {"experiment_name", "output_name", "loss_weights", "pilot"}
 
 
@@ -117,6 +119,11 @@ def compare_metadata(left: Mapping[str, Any], right: Mapping[str, Any]) -> list[
     problems = [f"missing {key}" for key in required if key not in left or key not in right]
     for key in required:
         if key in left and key in right and left[key] != right[key]:
+            problems.append(f"{key} differs")
+    if left.get("supervised_loss_config") != right.get("supervised_loss_config"):
+        problems.append("supervised_loss_config differs")
+    for key in ("normalization", "physics_operator"):
+        if left.get(key) != right.get(key):
             problems.append(f"{key} differs")
     lw, rw = left.get("loss_weights", {}), right.get("loss_weights", {})
     if lw.get("supervised_weight") != rw.get("supervised_weight"):

@@ -10,8 +10,10 @@ from scripts.train_unet_pinn_ab import resolve_experiment
 from src.config import load_ml_models_config
 from src.ml_data_split import build_holdout_fold
 from src.ml_models import build_model
+from src.ml_supervised import SupervisedLossConfig
+from src.ml_training import supervised_loss_components
 from src.unet_pinn import unet_pinn_losses
-from src.unet_pinn_ab import (AB_EXPERIMENTS, compare_metadata, configure_determinism,
+from src.unet_pinn_ab import (AB_EXPERIMENTS, IMPROVED_AB_EXPERIMENTS, compare_metadata, configure_determinism,
     cuda_peak_memory, membership_sha256, state_dict_sha256, validate_finite_gradients)
 
 
@@ -21,6 +23,61 @@ CFG = Path("configs/ml_models_config.yaml")
 def profiles():
     cfg = load_ml_models_config(CFG)
     return cfg, [resolve_experiment(cfg, name, False, None) for name in AB_EXPERIMENTS]
+
+
+def improved_profiles():
+    cfg = load_ml_models_config(CFG)
+    return cfg, [resolve_experiment(cfg, name, False, None) for name in IMPROVED_AB_EXPERIMENTS]
+
+
+def test_improved_profiles_differ_only_in_physics_weights_and_output_identity():
+    _, (left, right) = improved_profiles()
+    ignored = {"experiment_name", "output_name", "loss_weights"}
+    assert {k: v for k, v in left.items() if k not in ignored} == {
+        k: v for k, v in right.items() if k not in ignored
+    }
+    assert left["selection_metric"] == "improved_supervised_loss"
+    assert left["supervised_loss_config"] == right["supervised_loss_config"]
+    assert left["loss_weights"]["continuity_weight"] == 0.0
+    assert right["loss_weights"]["continuity_weight"] == 0.1
+    assert left["output_name"] == "unet_improved_supervised"
+    assert right["output_name"] == "unet_improved_pinn"
+
+
+def test_improved_pinn_loss_reuses_original_supervised_implementation_exactly():
+    config = SupervisedLossConfig(target_representation="nondimensional_perturbation",
+        wall_weight=3., wake_weight=3., gradient_loss_weight=.1)
+    pred = torch.randn(2, 3, 9, 11, requires_grad=True)
+    target = torch.randn_like(pred)
+    fluid = torch.ones(2, 1, 9, 11)
+    fluid[:, :, 3:5, 4:7] = 0
+    regions = torch.zeros(2, 3, 9, 11)
+    regions[:, 0, 2:7, 2:9] = fluid[:, 0, 2:7, 2:9]
+    regions[:, 1, 4:6, 7:10] = fluid[:, 0, 4:6, 7:10]
+    regions[:, 2] = fluid[:, 0] * (~regions[:, 0].bool() & ~regions[:, 1].bool())
+    x, y = torch.meshgrid(torch.linspace(0, 1, 11), torch.linspace(0, 1, 9), indexing="xy")
+    xy = torch.stack((x, y), -1)[None].repeat(2, 1, 1, 1)
+    original = supervised_loss_components(pred, target, fluid, regions, config, .1, .125)
+    combined = unet_pinn_losses(pred, target, fluid, fluid, xy, fluid, fluid*.01,
+        torch.full((2,), 1e-5), torch.full((2,), 10.), torch.ones(2),
+        (0.,1.,0.,1.,0.,1.), 1., 0., 0., compute_physics=False,
+        supervised_config=config, regions=regions)
+    torch.testing.assert_close(combined["supervised_loss"], original["total_loss"])
+    torch.testing.assert_close(combined["supervised_weighted_data_loss"], original["data_loss"])
+    torch.testing.assert_close(combined["supervised_gradient_loss"], original["gradient_loss"])
+    combined["loss_total"].backward()
+    assert pred.grad is not None and torch.isfinite(pred.grad).all()
+
+
+def test_improved_initial_state_and_training_settings_are_identical():
+    _, resolved = improved_profiles()
+    assert resolved[0]["model_config"] == resolved[1]["model_config"]
+    assert resolved[0]["training_config"] == resolved[1]["training_config"]
+    hashes = []
+    for item in resolved:
+        configure_determinism(item["training_config"]["seed"])
+        hashes.append(state_dict_sha256(build_model("unet_pinn", **item["model_config"]).state_dict()))
+    assert hashes[0] == hashes[1]
 
 
 def test_ab_profiles_differ_only_in_physics_weights_and_output_identity():

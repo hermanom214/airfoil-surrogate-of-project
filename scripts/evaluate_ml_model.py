@@ -72,6 +72,15 @@ def resolve_evaluation_checkpoint(paths, ml_cfg, model_name, experiment_name=Non
     return path,subdir
 
 
+def evaluate_pinn_physics(dataset, pred_batch, target_batch, sample):
+    """Use the checkpoint-configured target decoder for the training operator."""
+    return unet_pinn_losses(pred_batch, target_batch, sample["fluid_mask"][None],
+        sample["physics_mask"][None], sample["xy"][None], sample["k"][None],
+        sample["nut"][None], sample["nu"][None], sample["u_ref"][None], sample["l_ref"][None],
+        (dataset.p_mean, dataset.p_std, dataset.ux_mean, dataset.ux_std, dataset.uy_mean, dataset.uy_std),
+        supervised_config=dataset.supervised_config)
+
+
 @torch.no_grad()
 def run_validation(
     device_requested: str | None = None,
@@ -282,9 +291,7 @@ def run_validation(
             velocity_vector_error = np.sqrt((ux_pred - ux_true) ** 2 + (uy_pred - uy_true) ** 2)
 
             if model_name == "unet_pinn":
-                phys = unet_pinn_losses(pred_batch,target_batch,sample["fluid_mask"][None],sample["physics_mask"][None],
-                    sample["xy"][None],sample["k"][None],sample["nut"][None],sample["nu"][None],sample["u_ref"][None],sample["l_ref"][None],
-                    (dataset.p_mean,dataset.p_std,dataset.ux_mean,dataset.ux_std,dataset.uy_mean,dataset.uy_std))
+                phys = evaluate_pinn_physics(dataset, pred_batch, target_batch, sample)
                 continuity_loss=float(phys["loss_continuity"])
                 momentum_x_loss=float(phys["loss_momentum_x"]); momentum_y_loss=float(phys["loss_momentum_y"])
                 physics_loss=continuity_loss+momentum_x_loss+momentum_y_loss
